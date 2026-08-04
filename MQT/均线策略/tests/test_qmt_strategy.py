@@ -85,6 +85,81 @@ class SectorRankingTests(unittest.TestCase):
         self.assertEqual([item[0] for item in ranked], ["strong", "overheated"])
         self.assertGreater(ranked[0][1], ranked[1][1])
 
+    def test_sector_proxy_compounds_equal_weight_member_returns(self):
+        index = pd.Index(range(70))
+        history = {
+            "000001.SZ": pd.DataFrame({
+                "close": 100.0 * np.power(1.01, np.arange(70)),
+                "amount": np.repeat(100000000.0, 70),
+            }, index=index),
+            "600000.SH": pd.DataFrame({
+                "close": 100.0 * np.power(1.03, np.arange(70)),
+                "amount": np.repeat(200000000.0, 70),
+            }, index=index),
+        }
+
+        proxy = invoke(
+            "sector_proxy_frame", history,
+            ["000001.SZ", "600000.SH"], 2,
+        )
+
+        self.assertIsInstance(proxy, pd.DataFrame)
+        self.assertEqual(len(proxy), 70)
+        self.assertAlmostEqual(float(proxy["close"].iloc[0]), 100.0)
+        self.assertAlmostEqual(
+            float(proxy["close"].iloc[-1]),
+            100.0 * np.power(1.02, 69), places=6,
+        )
+        self.assertEqual(float(proxy["amount"].iloc[-1]), 300000000.0)
+
+    def test_sector_selection_uses_sw1_members_without_bkzs_indexes(self):
+        class FakeContext(object):
+            def __init__(self):
+                self.members = {
+                    "SW1汽车": ["000001.SZ", "000002.SZ"],
+                    "SW1银行": ["600000.SH", "600036.SH"],
+                }
+                self.history = {}
+                for code in self.members["SW1汽车"]:
+                    self.history[code] = pd.DataFrame({
+                        "close": 100.0 * np.power(1.005, np.arange(70)),
+                        "amount": np.repeat(100000000.0, 70),
+                    })
+                for code in self.members["SW1银行"]:
+                    self.history[code] = pd.DataFrame({
+                        "close": 100.0 * np.power(0.998, np.arange(70)),
+                        "amount": np.repeat(100000000.0, 70),
+                    })
+
+            def get_stock_list_in_sector(self, name):
+                return list(self.members.get(name, []))
+
+            def get_market_data_ex(self, fields, stocks, **kwargs):
+                return {
+                    code: self.history[code][list(fields)].copy()
+                    for code in stocks if code in self.history
+                }
+
+        original_names = getattr(strategy, "SW1_SECTOR_NAMES", None)
+        had_original_names = hasattr(strategy, "SW1_SECTOR_NAMES")
+        strategy.SW1_SECTOR_NAMES = ("SW1汽车", "SW1银行")
+        try:
+            benchmark = 100.0 * np.power(1.001, np.arange(70))
+            selected = invoke(
+                "_sector_selection", FakeContext(), "20260803", benchmark
+            ) or []
+            self.assertEqual(
+                [item["member_sector"] for item in selected], ["SW1汽车"]
+            )
+            self.assertEqual(
+                selected[0]["members"], ["000001.SZ", "000002.SZ"]
+            )
+        finally:
+            if had_original_names:
+                strategy.SW1_SECTOR_NAMES = original_names
+            else:
+                delattr(strategy, "SW1_SECTOR_NAMES")
+
 
 class StockSelectionTests(unittest.TestCase):
     @staticmethod
