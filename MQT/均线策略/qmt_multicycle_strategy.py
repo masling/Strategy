@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.4.0_20260804_5M_TO_30M
+# DOWNLOAD_BUILD: V1.4.1_20260804_UI_BACKTEST_RANGE
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_4"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_4_1"
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
 MAX_STOCKS_PER_STYLE = 2
@@ -70,6 +70,24 @@ class _State(object):
 
 
 A = _State()
+
+
+def _context_datetime(value, end_of_day=False):
+    if isinstance(value, datetime.datetime):
+        return value
+    if isinstance(value, datetime.date):
+        suffix = "235959" if end_of_day else "000000"
+        return datetime.datetime.strptime(value.strftime("%Y%m%d") + suffix,
+                                          "%Y%m%d%H%M%S")
+    digits = "".join(character for character in str(value or "")
+                     if character.isdigit())
+    if len(digits) >= 14:
+        return datetime.datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
+    if len(digits) >= 8:
+        suffix = "235959" if end_of_day else "000000"
+        return datetime.datetime.strptime(digits[:8] + suffix,
+                                          "%Y%m%d%H%M%S")
+    return None
 
 
 def _clean_array(values):
@@ -1311,6 +1329,13 @@ def init(context):
     A.mode = str(RUN_MODE).upper()
     if A.mode not in ("BACKTEST", "SIMULATION"):
         raise ValueError("RUN_MODE must be BACKTEST or SIMULATION")
+    if (A.mode == "BACKTEST"
+            and str(getattr(context, "period", "")).lower() != "5m"):
+        raise ValueError("QMT main chart period must be 5m for this strategy")
+    A.backtest_start = _context_datetime(getattr(context, "start", ""))
+    A.backtest_end = _context_datetime(
+        getattr(context, "end", ""), end_of_day=True
+    )
     A.acct = "test" if A.mode == "BACKTEST" else str(globals().get("account", ""))
     A.acct_type = "STOCK" if A.mode == "BACKTEST" else str(
         globals().get("accountType", "STOCK")
@@ -1332,7 +1357,14 @@ def init(context):
     A.sent_order_keys = set()
     A.retry_rebalance = False
     A.sector_source_logged = set()
+    A.first_bar_logged = False
     print("INIT", STRATEGY_NAME, A.mode, A.acct, A.acct_type)
+    if A.mode == "BACKTEST":
+        print(
+            "ENGINE", "period", getattr(context, "period", ""),
+            "start", getattr(context, "start", ""),
+            "end", getattr(context, "end", ""),
+        )
 
 
 def handlebar(context):
@@ -1344,6 +1376,13 @@ def handlebar(context):
             character for character in str(bar_text) if character.isdigit()
         )
         bar_time = datetime.datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
+        if A.backtest_start is not None and bar_time < A.backtest_start:
+            return
+        if A.backtest_end is not None and bar_time > A.backtest_end:
+            return
+        if not A.first_bar_logged:
+            print("FIRST_BAR", bar_time.strftime("%Y-%m-%d %H:%M:%S"))
+            A.first_bar_logged = True
         trade_date = bar_time.strftime("%Y%m%d")
         asof = (bar_time - datetime.timedelta(days=1)).strftime("%Y%m%d")
     else:
