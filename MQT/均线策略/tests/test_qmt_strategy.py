@@ -27,23 +27,63 @@ def invoke(name, *args, **kwargs):
 
 
 class MarketRegimeTests(unittest.TestCase):
-    def test_rising_daily_weekly_monthly_series_scores_100(self):
-        daily = np.arange(1.0, 131.0)
-        weekly = np.arange(1.0, 27.0)
-        monthly = np.arange(1.0, 25.0)
-        self.assertEqual(invoke("market_leg_score", daily, weekly, monthly), 100.0)
+    def test_rising_71340_daily_trend_scores_100(self):
+        daily = np.arange(1.0, 71.0)
+        self.assertEqual(invoke("trend_71340_score", daily), 100.0)
 
-    def test_falling_daily_weekly_monthly_series_scores_zero(self):
-        daily = np.arange(131.0, 0.0, -1.0)
-        weekly = np.arange(27.0, 1.0, -1.0)
-        monthly = np.arange(25.0, 1.0, -1.0)
-        self.assertEqual(invoke("market_leg_score", daily, weekly, monthly), 0.0)
+    def test_falling_71340_daily_trend_scores_zero(self):
+        daily = np.arange(71.0, 1.0, -1.0)
+        self.assertEqual(invoke("trend_71340_score", daily), 0.0)
 
-    def test_exposure_boundaries_are_conservative(self):
-        cases = [(49.9, 0.0), (50.0, 0.25), (60.0, 0.45),
-                 (70.0, 0.65), (80.0, 0.80)]
-        actual = [invoke("exposure_from_score", score) for score, _ in cases]
-        self.assertEqual(actual, [expected for _, expected in cases])
+    def test_short_rebound_under_falling_ma40_does_not_activate_style(self):
+        daily = np.concatenate([
+            np.linspace(100.0, 60.0, 40),
+            np.linspace(68.0, 100.0, 5),
+        ])
+        score = invoke("trend_71340_score", daily)
+        self.assertLess(score, 70.0)
+        self.assertEqual(
+            invoke("style_exposure_map", {"000852.SH": score}), {}
+        )
+
+    def test_one_strong_style_opens_only_its_25_percent_budget(self):
+        scores = {
+            "000300.SH": 20.0,
+            "000905.SH": 20.0,
+            "000852.SH": 80.0,
+            "399006.SZ": 20.0,
+        }
+        budgets = invoke("style_exposure_map", scores) or {}
+        self.assertEqual(budgets, {"000852.SH": 0.25})
+
+    def test_four_strong_styles_are_scaled_to_80_percent_cap(self):
+        scores = {
+            "000300.SH": 100.0,
+            "000905.SH": 100.0,
+            "000852.SH": 100.0,
+            "399006.SZ": 100.0,
+        }
+        budgets = invoke("style_exposure_map", scores) or {}
+        self.assertAlmostEqual(sum(budgets.values()), 0.80)
+        self.assertTrue(all(abs(value - 0.20) < 1e-12
+                            for value in budgets.values()))
+
+    def test_market_state_reads_daily_data_only(self):
+        class FakeContext(object):
+            def __init__(self):
+                self.periods = []
+
+            def get_market_data_ex(self, fields, stocks, **kwargs):
+                self.periods.append(kwargs["period"])
+                return {
+                    code: pd.DataFrame({"close": np.arange(1.0, 56.0)})
+                    for code in stocks
+                }
+
+        context = FakeContext()
+        market = invoke("_market_state", context, "20260803") or {}
+        self.assertEqual(context.periods, ["1d"])
+        self.assertAlmostEqual(market["exposure"], 0.80)
 
 
 class SectorRankingTests(unittest.TestCase):
@@ -52,7 +92,7 @@ class SectorRankingTests(unittest.TestCase):
             invoke("sector_member_name", "SW1电子加权"), "SW1电子"
         )
 
-    def test_sector_feature_uses_relative_strength_to_benchmark(self):
+    def test_sector_feature_uses_71340_relative_strength_to_benchmark(self):
         close = np.linspace(100.0, 140.0, 70)
         amount = np.linspace(100000000.0, 130000000.0, 70)
         frame = pd.DataFrame({"close": close, "amount": amount})
@@ -60,24 +100,25 @@ class SectorRankingTests(unittest.TestCase):
         feature = invoke("sector_feature", frame, benchmark)
         self.assertIsInstance(feature, dict)
         self.assertTrue(feature["eligible"])
-        self.assertGreater(feature["rel20"], 0.0)
+        self.assertGreater(feature["rel13"], 0.0)
+        self.assertGreater(feature["rel40"], 0.0)
         self.assertEqual(feature["trend"], 1.0)
 
     def test_sector_ranking_rejects_weak_trends_and_penalizes_overheat(self):
         features = {
             "strong": {
-                "rel20": 0.08, "rel60": 0.15, "trend": 1.0,
-                "amount_ratio": 1.20, "distance_ma20": 0.05,
+                "rel13": 0.08, "rel40": 0.15, "trend": 1.0,
+                "amount_ratio": 1.20, "distance_ma13": 0.05,
                 "eligible": True,
             },
             "overheated": {
-                "rel20": 0.12, "rel60": 0.18, "trend": 1.0,
-                "amount_ratio": 1.30, "distance_ma20": 0.22,
+                "rel13": 0.12, "rel40": 0.18, "trend": 1.0,
+                "amount_ratio": 1.30, "distance_ma13": 0.22,
                 "eligible": True,
             },
             "weak": {
-                "rel20": -0.05, "rel60": -0.10, "trend": 0.2,
-                "amount_ratio": 0.80, "distance_ma20": -0.04,
+                "rel13": -0.05, "rel40": -0.10, "trend": 0.2,
+                "amount_ratio": 0.80, "distance_ma13": -0.04,
                 "eligible": False,
             },
         }
@@ -112,7 +153,7 @@ class SectorRankingTests(unittest.TestCase):
         )
         self.assertEqual(float(proxy["amount"].iloc[-1]), 300000000.0)
 
-    def test_sector_selection_uses_sw1_members_without_bkzs_indexes(self):
+    def test_sector_selection_intersects_sw1_members_with_strong_style(self):
         class FakeContext(object):
             def __init__(self):
                 self.members = {
@@ -146,14 +187,13 @@ class SectorRankingTests(unittest.TestCase):
         try:
             benchmark = 100.0 * np.power(1.001, np.arange(70))
             selected = invoke(
-                "_sector_selection", FakeContext(), "20260803", benchmark
+                "_sector_selection", FakeContext(), "20260803", benchmark,
+                {"000001.SZ", "600000.SH"}, "000852.SH",
             ) or []
-            self.assertEqual(
-                [item["member_sector"] for item in selected], ["SW1汽车"]
-            )
-            self.assertEqual(
-                selected[0]["members"], ["000001.SZ", "000002.SZ"]
-            )
+            self.assertEqual([item["member_sector"] for item in selected],
+                             ["SW1汽车"])
+            self.assertEqual(selected[0]["members"], ["000001.SZ"])
+            self.assertEqual(selected[0]["style"], "000852.SH")
         finally:
             if had_original_names:
                 strategy.SW1_SECTOR_NAMES = original_names
@@ -176,15 +216,16 @@ class StockSelectionTests(unittest.TestCase):
 
     def test_stock_feature_accepts_liquid_orderly_uptrend(self):
         feature = invoke(
-            "stock_feature", self.make_frame(), 0.05, 0.10, 50000000.0
+            "stock_feature", self.make_frame(), 0.01, 0.03, 50000000.0
         )
         self.assertIsNotNone(feature)
-        self.assertGreater(feature["rs20"], 0.0)
+        self.assertGreater(feature["rs13"], 0.0)
+        self.assertGreater(feature["rs40"], 0.0)
 
     def test_stock_feature_rejects_illiquid_stock(self):
         feature = invoke(
             "stock_feature", self.make_frame(amount=1000000.0),
-            0.05, 0.10, 50000000.0
+            0.01, 0.03, 50000000.0
         )
         self.assertIsNone(feature)
 
@@ -194,6 +235,8 @@ class StockSelectionTests(unittest.TestCase):
         metrics = invoke("position_metrics", frame)
         self.assertIsInstance(metrics, dict)
         self.assertEqual(metrics["close"], 100.0)
+        self.assertIn("ma13", metrics)
+        self.assertIn("ma40", metrics)
         self.assertGreater(metrics["atr"], 0.0)
 
     def test_select_stocks_enforces_two_names_per_sector(self):
@@ -209,12 +252,12 @@ class StockSelectionTests(unittest.TestCase):
     def test_cross_sectional_stock_score_prefers_stronger_liquid_name(self):
         candidates = [
             {"code": "A", "sector": "S1", "feature": {
-                "rs20": 0.10, "rs60": 0.20, "r20": 0.15,
+                "rs13": 0.10, "rs40": 0.20, "r13": 0.15,
                 "high_proximity": 0.98, "average_amount": 200000000.0,
                 "volatility": 0.01,
             }},
             {"code": "B", "sector": "S2", "feature": {
-                "rs20": 0.02, "rs60": 0.04, "r20": 0.05,
+                "rs13": 0.02, "rs40": 0.04, "r13": 0.05,
                 "high_proximity": 0.90, "average_amount": 60000000.0,
                 "volatility": 0.03,
             }},
@@ -232,32 +275,39 @@ class StockSelectionTests(unittest.TestCase):
 class RiskAndSizingTests(unittest.TestCase):
     def test_initial_atr_stop_overrides_minimum_holding_period(self):
         reason = invoke(
-            "exit_reason", close=90.0, ma20=95.0, atr=4.0,
-            entry_price=100.0, peak_price=104.0, holding_days=2,
-            still_selected=True, exposure=0.80,
+            "exit_reason", close=90.0, high=92.0, ma13=95.0, ma40=94.0,
+            atr=4.0, entry_price=100.0, prior_below_ma13_days=0,
+            still_selected=True, style_exposure=0.25,
         )
         self.assertEqual(reason, "initial_stop")
 
-    def test_rotation_exit_has_no_minimum_holding_period(self):
+    def test_style_rotation_exit_has_no_minimum_holding_period(self):
         reason = invoke(
-            "exit_reason", 105.0, 100.0, 3.0, 100.0, 106.0,
-            1, False, 0.80,
+            "exit_reason",
+            105.0, 106.0, 100.0, 95.0, 3.0, 100.0, 0, False, 0.25,
         )
         self.assertEqual(reason, "sector_rotation")
 
-    def test_take_profit_can_exit_on_first_holding_day(self):
+    def test_profit_and_holding_days_do_not_force_exit(self):
         reason = invoke(
-            "exit_reason", 112.0, 108.0, 3.0, 100.0, 112.0,
-            1, True, 0.80,
+            "exit_reason",
+            130.0, 132.0, 120.0, 110.0, 3.0, 100.0, 0, True, 0.25,
         )
-        self.assertEqual(reason, "take_profit")
+        self.assertIsNone(reason)
 
-    def test_twenty_day_maximum_holding_exit(self):
+    def test_ma40_break_exits_immediately(self):
         reason = invoke(
-            "exit_reason", 110.0, 100.0, 3.0, 100.0, 112.0,
-            20, True, 0.80,
+            "exit_reason",
+            94.0, 96.0, 98.0, 95.0, 4.0, 100.0, 0, True, 0.25,
         )
-        self.assertEqual(reason, "max_holding")
+        self.assertEqual(reason, "ma40_break")
+
+    def test_failed_rebound_to_ma13_exits_after_prior_break(self):
+        reason = invoke(
+            "exit_reason", 99.0, 100.5, 100.0, 95.0, 3.0, 100.0,
+            1, True, 0.25,
+        )
+        self.assertEqual(reason, "ma13_rebound_failed")
 
     def test_target_shares_rounds_down_to_board_lot(self):
         shares = invoke(
@@ -265,6 +315,81 @@ class RiskAndSizingTests(unittest.TestCase):
             position_count=6, price=20.0, max_weight=0.15,
         )
         self.assertEqual(shares, 6600)
+
+    def test_style_budget_is_divided_only_inside_that_style(self):
+        strategy.A.blocked_codes = set()
+        strategy.A.intraday_scales = {}
+        snapshot = {"balance": 1000000.0}
+        candidates = [
+            {"code": "A", "style": "S1", "feature": {"close": 10.0}},
+            {"code": "B", "style": "S1", "feature": {"close": 20.0}},
+            {"code": "C", "style": "S2", "feature": {"close": 10.0}},
+        ]
+        desired = invoke(
+            "_desired_share_map", snapshot, {"S1": 0.25, "S2": 0.10},
+            candidates, {},
+        )
+        self.assertEqual(desired, {"A": 12500, "B": 6200, "C": 10000})
+
+
+class IntradayAggregationTests(unittest.TestCase):
+    @staticmethod
+    def make_5m(times):
+        count = len(times)
+        close = np.arange(10.0, 10.0 + count)
+        return pd.DataFrame({
+            "open": close - 0.2,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.arange(100.0, 100.0 + count),
+            "amount": np.arange(1000.0, 1000.0 + count),
+        }, index=pd.to_datetime(times))
+
+    def test_5m_aggregation_keeps_only_complete_session_30m_bars(self):
+        times = [
+            "2026-08-03 09:35", "2026-08-03 09:40",
+            "2026-08-03 09:45", "2026-08-03 09:50",
+            "2026-08-03 09:55", "2026-08-03 10:00",
+            "2026-08-03 10:05", "2026-08-03 10:10",
+            "2026-08-03 10:15", "2026-08-03 10:20",
+            "2026-08-03 10:25", "2026-08-03 10:30",
+            "2026-08-03 13:05",
+        ]
+        bars = invoke("aggregate_5m_to_30m", self.make_5m(times))
+        self.assertEqual(list(bars.index.strftime("%H:%M")), ["10:00", "10:30"])
+        self.assertEqual(float(bars.iloc[0]["open"]), 9.8)
+        self.assertEqual(float(bars.iloc[0]["close"]), 15.0)
+        self.assertEqual(float(bars.iloc[0]["volume"]), 615.0)
+
+    def test_confirmed_30m_volume_reversal_reduces_position(self):
+        index = pd.date_range("2026-08-03 10:00", periods=22, freq="30min")
+        frame = pd.DataFrame({
+            "open": np.repeat(10.0, 22),
+            "high": np.repeat(10.5, 22),
+            "low": np.repeat(9.8, 22),
+            "close": np.repeat(10.2, 22),
+            "volume": np.repeat(100.0, 22),
+            "amount": np.repeat(1000.0, 22),
+        }, index=index)
+        frame.iloc[-2] = [10.0, 12.0, 9.9, 10.4, 220.0, 2200.0]
+        frame.iloc[-1] = [10.3, 10.4, 9.7, 9.8, 120.0, 1200.0]
+        self.assertEqual(
+            invoke("intraday_action", frame, 9.5, 9.0, False), "reduce"
+        )
+
+    def test_30m_reversal_near_daily_support_adds_reduced_part_back(self):
+        frame = pd.DataFrame({
+            "open": [10.1, 10.2],
+            "high": [10.3, 10.6],
+            "low": [9.95, 10.0],
+            "close": [10.1, 10.5],
+            "volume": [100.0, 120.0],
+            "amount": [1000.0, 1200.0],
+        }, index=pd.to_datetime(["2026-08-03 10:00", "2026-08-03 10:30"]))
+        self.assertEqual(
+            invoke("intraday_action", frame, 10.0, 9.7, True), "add"
+        )
 
 
 class QmtAdapterTests(unittest.TestCase):
@@ -349,10 +474,12 @@ class QmtAdapterTests(unittest.TestCase):
         snapshot = {"balance": 1000000.0}
         candidates = [{
             "code": "000001.SZ",
+            "style": "000852.SH",
             "feature": {"close": 10.0},
         }]
         desired = invoke(
-            "_desired_share_map", snapshot, 0.80, candidates, {}
+            "_desired_share_map", snapshot,
+            {"000852.SH": 0.25}, candidates, {}
         ) or {}
         self.assertEqual(desired, {})
 
