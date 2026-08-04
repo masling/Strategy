@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.4.1_20260804_UI_BACKTEST_RANGE
+# DOWNLOAD_BUILD: V1.4.2_20260804_PORTFOLIO_DIAGNOSTICS
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_4_1"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_4_2"
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
 MAX_STOCKS_PER_STYLE = 2
@@ -833,9 +833,19 @@ def _backtest_snapshot(context):
             "available": volume,
             "open_price": open_price,
         }
+    available_cash = max(0.0, balance - market_value)
+    print(
+        "PORTFOLIO",
+        "capital", capital,
+        "net_value", net_value,
+        "balance", balance,
+        "market_value", market_value,
+        "cash", available_cash,
+        "positions", len(position_map),
+    )
     return {
         "balance": balance,
-        "available_cash": max(0.0, balance - market_value),
+        "available_cash": available_cash,
         "positions": position_map,
     }
 
@@ -1303,6 +1313,7 @@ def run_daily_cycle(context, asof, trade_date):
         A.desired_shares = _desired_share_map(
             snapshot, style_exposures, A.target_candidates, tick_map
         )
+        print("DESIRED", trade_date, A.desired_shares)
         A.rebalance_age = 0
 
     exit_sent = _risk_exits(
