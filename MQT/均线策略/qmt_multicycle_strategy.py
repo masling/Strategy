@@ -1,4 +1,5 @@
 #coding:gbk
+# DOWNLOAD_BUILD: V1.3.0_20260804_SW1_PROXY
 
 import datetime
 
@@ -18,7 +19,39 @@ TAKE_PROFIT_RATE = 0.12
 ALLOW_CHINEXT = True
 ALLOW_STAR = False
 ALLOW_BSE = False
-SECTOR_INDEX_BOARD = u"\u8fc5\u6295\u4e00\u7ea7\u884c\u4e1a\u677f\u5757\u52a0\u6743\u6307\u6570"
+SW1_SECTOR_NAMES = tuple("SW1" + name for name in (
+    u"\u519c\u6797\u7267\u6e14",
+    u"\u57fa\u7840\u5316\u5de5",
+    u"\u94a2\u94c1",
+    u"\u6709\u8272\u91d1\u5c5e",
+    u"\u7535\u5b50",
+    u"\u6c7d\u8f66",
+    u"\u5bb6\u7528\u7535\u5668",
+    u"\u98df\u54c1\u996e\u6599",
+    u"\u7eba\u7ec7\u670d\u9970",
+    u"\u8f7b\u5de5\u5236\u9020",
+    u"\u533b\u836f\u751f\u7269",
+    u"\u516c\u7528\u4e8b\u4e1a",
+    u"\u4ea4\u901a\u8fd0\u8f93",
+    u"\u623f\u5730\u4ea7",
+    u"\u5546\u8d38\u96f6\u552e",
+    u"\u793e\u4f1a\u670d\u52a1",
+    u"\u7efc\u5408",
+    u"\u5efa\u7b51\u6750\u6599",
+    u"\u5efa\u7b51\u88c5\u9970",
+    u"\u7535\u529b\u8bbe\u5907",
+    u"\u56fd\u9632\u519b\u5de5",
+    u"\u8ba1\u7b97\u673a",
+    u"\u4f20\u5a92",
+    u"\u901a\u4fe1",
+    u"\u94f6\u884c",
+    u"\u975e\u94f6\u91d1\u878d",
+    u"\u7f8e\u5bb9\u62a4\u7406",
+    u"\u7164\u70ad",
+    u"\u77f3\u6cb9\u77f3\u5316",
+    u"\u73af\u4fdd",
+    u"\u673a\u68b0\u8bbe\u5907",
+))
 MARKET_INDEXES = [
     ("000300.SH", 0.30),
     ("000905.SH", 0.25),
@@ -142,6 +175,53 @@ def sector_member_name(index_name):
     if "SW1" in text:
         return text[text.index("SW1"):]
     return "SW1" + text
+
+
+def sector_proxy_frame(history, member_codes, min_members=5):
+    return_parts = []
+    amount_parts = []
+    for code in member_codes or []:
+        frame = history.get(code)
+        if frame is None or len(frame) < 2 or "close" not in frame.columns:
+            continue
+        data = frame.replace([np.inf, -np.inf], np.nan).sort_index()
+        close = pd.Series(
+            np.asarray(data["close"], dtype=float),
+            index=data.index,
+            name=code,
+        )
+        close = close.where(close > 0.0)
+        previous = close.shift(1)
+        daily_return = close / previous - 1.0
+        daily_return.loc[close.notna() & previous.isna()] = 0.0
+        daily_return = daily_return.where(daily_return.abs() <= 0.35)
+        return_parts.append(daily_return)
+        if "amount" in data.columns:
+            amount_parts.append(pd.Series(
+                np.asarray(data["amount"], dtype=float),
+                index=data.index,
+                name=code,
+            ))
+    if not return_parts:
+        return None
+
+    returns = pd.concat(return_parts, axis=1).sort_index()
+    required = min(max(1, int(min_members)), len(return_parts))
+    valid_count = returns.notna().sum(axis=1)
+    average_return = returns.mean(axis=1, skipna=True)
+    average_return = average_return.where(valid_count >= required)
+    proxy_close = (1.0 + average_return).cumprod() * 100.0
+
+    if amount_parts:
+        amounts = pd.concat(amount_parts, axis=1).sort_index()
+        proxy_amount = amounts.sum(axis=1, min_count=1)
+    else:
+        proxy_amount = pd.Series(1.0, index=proxy_close.index)
+    result = pd.DataFrame({
+        "close": proxy_close,
+        "amount": proxy_amount.reindex(proxy_close.index),
+    })
+    return result.replace([np.inf, -np.inf], np.nan).dropna(subset=["close"])
 
 
 def sector_feature(frame, benchmark_close):
@@ -466,38 +546,55 @@ def _market_state(context, asof):
 
 
 def _sector_selection(context, asof, benchmark):
-    try:
-        index_codes = context.get_stock_list_in_sector(SECTOR_INDEX_BOARD) or []
-    except Exception:
-        index_codes = []
-    if not index_codes:
-        print("ERROR sector index board is empty:", SECTOR_INDEX_BOARD)
-        return []
-    history = fetch_history(
-        context, ["close", "amount"], index_codes, "1d", 70, asof
-    )
-    features = {}
     records = {}
-    for index_code in index_codes:
-        feature = sector_feature(history.get(index_code), benchmark)
-        if feature is None:
-            continue
-        index_name = _instrument_name(context, index_code)
-        member_sector = sector_member_name(index_name)
+    all_codes = []
+    seen_codes = set()
+    for sector_name in SW1_SECTOR_NAMES:
         try:
-            members = context.get_stock_list_in_sector(member_sector) or []
+            members = context.get_stock_list_in_sector(sector_name) or []
         except Exception:
             members = []
+        members = [
+            code for code in members
+            if board_allowed(code, ALLOW_CHINEXT, ALLOW_STAR, ALLOW_BSE)
+        ]
         if not members:
             continue
-        features[index_code] = feature
-        records[index_code] = {
-            "code": index_code,
-            "name": index_name,
-            "member_sector": member_sector,
+        records[sector_name] = {
+            "code": sector_name,
+            "name": sector_name,
+            "member_sector": sector_name,
             "members": members,
-            "feature": feature,
         }
+        for code in members:
+            if code not in seen_codes:
+                seen_codes.add(code)
+                all_codes.append(code)
+    if not records:
+        print("ERROR SW1 sector boards are empty")
+        return []
+
+    history = fetch_history(
+        context, ["close", "amount"], all_codes, "1d", 70, asof,
+        "back_ratio",
+    )
+    features = {}
+    for sector_name, record in records.items():
+        proxy = sector_proxy_frame(history, record["members"], 5)
+        feature = sector_feature(proxy, benchmark)
+        if feature is None:
+            continue
+        features[sector_name] = feature
+        record["feature"] = feature
+    if not features:
+        print("ERROR SW1 member history is insufficient")
+        return []
+    if not getattr(A, "sector_source_logged", False):
+        print(
+            "SECTOR_SOURCE SW1_MEMBER_PROXY boards", len(records),
+            "stocks", len(all_codes), "histories", len(history)
+        )
+        A.sector_source_logged = True
     ranked = rank_sectors(features, MAX_SECTORS)
     selected = []
     for code, score in ranked:
@@ -986,6 +1083,7 @@ def init(context):
     A.owned_codes = set()
     A.sent_order_keys = set()
     A.retry_rebalance = False
+    A.sector_source_logged = False
     print("INIT", STRATEGY_NAME, A.mode, A.acct, A.acct_type)
 
 
