@@ -393,6 +393,75 @@ class IntradayAggregationTests(unittest.TestCase):
 
 
 class QmtAdapterTests(unittest.TestCase):
+    def test_backtest_init_rejects_non_5m_main_period(self):
+        class FakeContext(object):
+            period = "1d"
+            start = "2026-01-01 00:00:00"
+            end = "2026-08-04 23:59:59"
+
+        with self.assertRaisesRegex(ValueError, "5m"):
+            invoke("init", FakeContext())
+
+    def test_backtest_skips_bars_before_interface_start(self):
+        class FakeContext(object):
+            period = "5m"
+            start = "2026-01-01 00:00:00"
+            end = "2026-08-04 23:59:59"
+            barpos = 0
+
+            @staticmethod
+            def get_bar_timetag(index):
+                return index
+
+        context = FakeContext()
+        original_timetag = getattr(strategy, "timetag_to_datetime", None)
+        had_original_timetag = hasattr(strategy, "timetag_to_datetime")
+        original_daily = strategy.run_daily_cycle
+        calls = []
+        strategy.timetag_to_datetime = lambda *args: "20251231093500"
+        strategy.run_daily_cycle = lambda *args: calls.append(args)
+        try:
+            invoke("init", context)
+            invoke("handlebar", context)
+            self.assertEqual(calls, [])
+            self.assertEqual(context.start, "2026-01-01 00:00:00")
+            self.assertEqual(context.end, "2026-08-04 23:59:59")
+        finally:
+            strategy.run_daily_cycle = original_daily
+            if had_original_timetag:
+                strategy.timetag_to_datetime = original_timetag
+            else:
+                delattr(strategy, "timetag_to_datetime")
+
+    def test_backtest_skips_bars_after_interface_end(self):
+        class FakeContext(object):
+            period = "5m"
+            start = "2026-01-01 00:00:00"
+            end = "2026-08-04 23:59:59"
+            barpos = 0
+
+            @staticmethod
+            def get_bar_timetag(index):
+                return index
+
+        context = FakeContext()
+        original_timetag = getattr(strategy, "timetag_to_datetime", None)
+        had_original_timetag = hasattr(strategy, "timetag_to_datetime")
+        original_daily = strategy.run_daily_cycle
+        calls = []
+        strategy.timetag_to_datetime = lambda *args: "20260805000500"
+        strategy.run_daily_cycle = lambda *args: calls.append(args)
+        try:
+            invoke("init", context)
+            invoke("handlebar", context)
+            self.assertEqual(calls, [])
+        finally:
+            strategy.run_daily_cycle = original_daily
+            if had_original_timetag:
+                strategy.timetag_to_datetime = original_timetag
+            else:
+                delattr(strategy, "timetag_to_datetime")
+
     def test_backtest_snapshot_uses_backtest_records_without_logged_in_account(self):
         class FakeHolding(object):
             market = "SZ"
