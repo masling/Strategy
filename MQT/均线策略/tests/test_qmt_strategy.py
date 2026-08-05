@@ -402,6 +402,17 @@ class QmtAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "5m"):
             invoke("init", FakeContext())
 
+    def test_backtest_init_sets_configured_capital_when_interface_is_invalid(self):
+        class FakeContext(object):
+            period = "5m"
+            start = -1
+            end = -1
+            capital = -1.0
+
+        context = FakeContext()
+        invoke("init", context)
+        self.assertEqual(context.capital, 1000000.0)
+
     def test_backtest_skips_bars_before_interface_start(self):
         class FakeContext(object):
             period = "5m"
@@ -515,6 +526,28 @@ class QmtAdapterTests(unittest.TestCase):
                 strategy.get_trade_detail_data = original_trade
             else:
                 delattr(strategy, "get_trade_detail_data")
+            if had_original_records:
+                strategy.get_result_records = original_records
+            else:
+                delattr(strategy, "get_result_records")
+
+    def test_backtest_snapshot_falls_back_when_context_capital_is_invalid(self):
+        class FakeContext(object):
+            capital = -1.0
+            barpos = 0
+
+            @staticmethod
+            def get_net_value(index):
+                return 1.0
+
+        original_records = getattr(strategy, "get_result_records", None)
+        had_original_records = hasattr(strategy, "get_result_records")
+        strategy.get_result_records = lambda *args: []
+        try:
+            snapshot = invoke("_backtest_snapshot", FakeContext())
+            self.assertEqual(snapshot["balance"], 1000000.0)
+            self.assertEqual(snapshot["available_cash"], 1000000.0)
+        finally:
             if had_original_records:
                 strategy.get_result_records = original_records
             else:
