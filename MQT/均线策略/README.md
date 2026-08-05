@@ -1,4 +1,4 @@
-# QMT 多风格 7/13/40 均线轮动策略 v1.4.2
+# QMT 多风格 7/13/40 均线轮动策略 v1.4.3
 
 这是一版运行在 QMT 内置 Python 中的 A 股结构性行情策略。默认配置为 `BACKTEST`，不会主动向模拟或真实账户报单。
 
@@ -101,6 +101,8 @@ QMT补充数据没有30分钟选项，因此策略只读取 `5m`，按A股固定
 
 策略会读取界面传入的 `ContextInfo.start/end` 作为保护边界，即使引擎额外传入区间外K线也会跳过。回测模式若主图不是 `5m` 会直接报错，避免误用日线从主图最早历史开始运行。
 
+部分券商版QMT在正式回测中会把界面初始资金暴露为 `ContextInfo.capital=-1`。策略优先使用界面返回的正数资金；仅当该值无效时，才在 `init()` 中写入 `BACKTEST_INITIAL_CAPITAL`，默认为100万元，并输出 `WARNING invalid context.capital`。如需改变回测资金，请同时调整界面金额和该备用参数。
+
 关键日志：
 
 | 日志 | 含义 |
@@ -139,6 +141,7 @@ QMT“模拟信号模式”只记录信号。需要模拟柜台实际接收委�
 | `STYLE_STRONG_SCORE` | 80 | 强势风格阈值 |
 | `STYLE_WATCH_SCORE` | 70 | 观察仓阈值 |
 | `MAX_TOTAL_EXPOSURE` | 0.80 | 总仓位上限 |
+| `BACKTEST_INITIAL_CAPITAL` | 1000000 | QMT返回无效初始资金时的回测备用资金 |
 | `MAX_SECTORS_PER_STYLE` | 3 | 每个风格最大行业数 |
 | `MAX_STOCKS_PER_STYLE` | 2 | 每个风格最大股票数 |
 | `MAX_STOCK_WEIGHT` | 0.15 | 单股仓位上限 |
