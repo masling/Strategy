@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.4.2_20260804_PORTFOLIO_DIAGNOSTICS
+# DOWNLOAD_BUILD: V1.4.3_20260805_BACKTEST_CAPITAL_FALLBACK
 
 import datetime
 
@@ -8,7 +8,8 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_4_2"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_4_3"
+BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
 MAX_STOCKS_PER_STYLE = 2
@@ -88,6 +89,16 @@ def _context_datetime(value, end_of_day=False):
         return datetime.datetime.strptime(digits[:8] + suffix,
                                           "%Y%m%d%H%M%S")
     return None
+
+
+def _backtest_capital(context):
+    try:
+        capital = float(getattr(context, "capital", -1.0))
+    except (TypeError, ValueError):
+        capital = -1.0
+    if np.isfinite(capital) and capital > 0.0:
+        return capital, False
+    return float(BACKTEST_INITIAL_CAPITAL), True
 
 
 def _clean_array(values):
@@ -812,10 +823,16 @@ def _backtest_snapshot(context):
     try:
         holdings = get_result_records("holdings", context.barpos, context) or []
         net_value = float(context.get_net_value(context.barpos))
-        capital = float(context.capital)
+        capital, used_fallback = _backtest_capital(context)
     except Exception as error:
         print("ERROR backtest portfolio query failed:", error)
         return None
+
+    if used_fallback:
+        print(
+            "WARNING invalid context.capital, using configured capital",
+            capital,
+        )
 
     balance = capital * net_value
     market_value = 0.0
@@ -1343,6 +1360,14 @@ def init(context):
     if (A.mode == "BACKTEST"
             and str(getattr(context, "period", "")).lower() != "5m"):
         raise ValueError("QMT main chart period must be 5m for this strategy")
+    if A.mode == "BACKTEST":
+        capital, used_fallback = _backtest_capital(context)
+        if used_fallback:
+            context.capital = capital
+            print(
+                "WARNING invalid context.capital, set configured capital",
+                capital,
+            )
     A.backtest_start = _context_datetime(getattr(context, "start", ""))
     A.backtest_end = _context_datetime(
         getattr(context, "end", ""), end_of_day=True
