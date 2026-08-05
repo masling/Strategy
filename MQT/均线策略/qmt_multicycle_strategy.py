@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.4.4_20260805_BACKTEST_T1_AVAILABLE
+# DOWNLOAD_BUILD: V1.4.5_20260805_DAILY_PORTFOLIO_LOG
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_4_4"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_4_5"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -852,12 +852,6 @@ def _virtual_backtest_snapshot():
         "available_cash": max(0.0, float(account_data.m_dAvailable)),
         "positions": position_map,
     }
-    print(
-        "PORTFOLIO", "source", "virtual_account",
-        "balance", snapshot["balance"],
-        "cash", snapshot["available_cash"],
-        "positions", len(position_map),
-    )
     return snapshot
 
 
@@ -895,9 +889,24 @@ def _backtest_trade_day(context):
     return _record_trade_day(value)
 
 
+def _portfolio_log_due(context):
+    trade_day = _backtest_trade_day(context) or "UNKNOWN"
+    if getattr(A, "last_portfolio_log_date", "") == trade_day:
+        return False
+    A.last_portfolio_log_date = trade_day
+    return True
+
+
 def _backtest_snapshot(context):
     virtual_snapshot = _virtual_backtest_snapshot()
     if virtual_snapshot is not None:
+        if _portfolio_log_due(context):
+            print(
+                "PORTFOLIO", "source", "virtual_account",
+                "balance", virtual_snapshot["balance"],
+                "cash", virtual_snapshot["available_cash"],
+                "positions", len(virtual_snapshot["positions"]),
+            )
         return virtual_snapshot
     try:
         holdings = get_result_records("holdings", context.barpos, context) or []
@@ -947,15 +956,16 @@ def _backtest_snapshot(context):
             "open_price": open_price,
         }
     available_cash = max(0.0, balance - market_value)
-    print(
-        "PORTFOLIO", "source", "result_records",
-        "capital", capital,
-        "net_value", net_value,
-        "balance", balance,
-        "market_value", market_value,
-        "cash", available_cash,
-        "positions", len(position_map),
-    )
+    if _portfolio_log_due(context):
+        print(
+            "PORTFOLIO", "source", "result_records",
+            "capital", capital,
+            "net_value", net_value,
+            "balance", balance,
+            "market_value", market_value,
+            "cash", available_cash,
+            "positions", len(position_map),
+        )
     return {
         "balance": balance,
         "available_cash": available_cash,
@@ -1490,6 +1500,7 @@ def init(context):
     A.retry_rebalance = False
     A.sector_source_logged = set()
     A.first_bar_logged = False
+    A.last_portfolio_log_date = ""
     print("INIT", STRATEGY_NAME, A.mode, A.acct, A.acct_type)
     if A.mode == "BACKTEST":
         print(
