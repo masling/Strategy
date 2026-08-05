@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.4.5_20260805_DAILY_PORTFOLIO_LOG
+# DOWNLOAD_BUILD: V1.5.0_20260805_EXECUTABLE_ALLOCATION
 
 import datetime
 
@@ -8,11 +8,12 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_4_5"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
 MAX_STOCKS_PER_STYLE = 2
+STOCK_CANDIDATE_POOL_PER_STYLE = 6
 MAX_PER_SECTOR = 2
 MAX_STOCK_WEIGHT = 0.15
 MIN_AVERAGE_AMOUNT = 50000000.0
@@ -812,7 +813,8 @@ def _stock_selection(context, asof, sectors):
             "feature": feature,
         })
     selected = select_stocks(
-        score_stock_candidates(candidates), MAX_STOCKS_PER_STYLE, MAX_PER_SECTOR
+        score_stock_candidates(candidates),
+        STOCK_CANDIDATE_POOL_PER_STYLE, MAX_PER_SECTOR
     )
     for item in selected:
         item["name"] = _instrument_name(context, item["code"])
@@ -1129,18 +1131,34 @@ def _desired_share_map(snapshot, style_exposures, candidates, tick_map):
     if not candidates or not style_exposures:
         return desired
     candidate_map = {item["code"]: item for item in candidates}
-    counts = {}
-    for item in candidates:
-        style = item.get("style")
-        if float(style_exposures.get(style, 0.0)) > 0.0:
-            counts[style] = counts.get(style, 0) + 1
-    for item in candidates:
+    selected = []
+    style_counts = {}
+    ordered = sorted(
+        candidates, key=lambda item: float(item.get("score", 0.0)),
+        reverse=True,
+    )
+    for item in ordered:
         code = item["code"]
         if code in getattr(A, "blocked_codes", set()):
             continue
         style = item.get("style")
         style_exposure = float(style_exposures.get(style, 0.0))
-        style_count = int(counts.get(style, 0))
+        if style_exposure <= 0.0:
+            continue
+        if style_counts.get(style, 0) >= MAX_STOCKS_PER_STYLE:
+            continue
+        price = _execution_price(code, candidate_map, tick_map, "buy")
+        if target_shares(
+                snapshot["balance"], style_exposure, 1,
+                price, MAX_STOCK_WEIGHT) < 100:
+            continue
+        selected.append(item)
+        style_counts[style] = style_counts.get(style, 0) + 1
+    for item in selected:
+        code = item["code"]
+        style = item.get("style")
+        style_exposure = float(style_exposures.get(style, 0.0))
+        style_count = int(style_counts.get(style, 0))
         if style_exposure <= 0.0 or style_count <= 0:
             continue
         price = _execution_price(code, candidate_map, tick_map, "buy")
@@ -1149,8 +1167,32 @@ def _desired_share_map(snapshot, style_exposures, candidates, tick_map):
             price, MAX_STOCK_WEIGHT
         )
         scale = float(getattr(A, "intraday_scales", {}).get(code, 1.0))
-        desired[code] = int(shares * scale / 100.0) * 100
+        sized = int(shares * scale / 100.0) * 100
+        if sized > 0:
+            desired[code] = sized
     return desired
+
+
+def allocation_metrics(total_asset, style_exposures, desired_shares,
+                       candidates):
+    total = float(total_asset)
+    planned = sum(float(value) for value in (style_exposures or {}).values())
+    prices = {
+        item["code"]: float(item.get("feature", {}).get("close", 0.0))
+        for item in candidates or []
+    }
+    target_value = sum(
+        int(shares) * prices.get(code, 0.0)
+        for code, shares in (desired_shares or {}).items()
+    )
+    target_exposure = target_value / total if total > 0.0 else 0.0
+    fill_rate = target_exposure / planned if planned > 0.0 else 1.0
+    return {
+        "planned_exposure": round(planned, 6),
+        "target_exposure": round(target_exposure, 6),
+        "fill_rate": round(fill_rate, 6),
+        "unallocated_cash": round(max(0.0, total * planned - target_value), 2),
+    }
 
 
 def _rebalance_to_desired(context, snapshot, trade_date):
@@ -1437,6 +1479,17 @@ def run_daily_cycle(context, asof, trade_date):
             snapshot, style_exposures, A.target_candidates, tick_map
         )
         print("DESIRED", trade_date, A.desired_shares)
+        allocation = allocation_metrics(
+            snapshot["balance"], style_exposures,
+            A.desired_shares, A.target_candidates
+        )
+        print(
+            "ALLOCATION", trade_date,
+            "planned_exposure", allocation["planned_exposure"],
+            "target_exposure", allocation["target_exposure"],
+            "fill_rate", allocation["fill_rate"],
+            "unallocated_cash", allocation["unallocated_cash"],
+        )
         A.rebalance_age = 0
 
     exit_sent = _risk_exits(
