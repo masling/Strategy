@@ -333,6 +333,36 @@ class RiskAndSizingTests(unittest.TestCase):
         )
         self.assertEqual(desired, {"A": 12500, "B": 6200, "C": 10000})
 
+    def test_sizing_skips_zero_lot_candidate_and_uses_next_ranked_names(self):
+        strategy.A.blocked_codes = set()
+        strategy.A.intraday_scales = {}
+        snapshot = {"balance": 1000000.0}
+        candidates = [
+            {"code": "EXPENSIVE", "style": "S1", "score": 100.0,
+             "feature": {"close": 2000.0}},
+            {"code": "B", "style": "S1", "score": 90.0,
+             "feature": {"close": 10.0}},
+            {"code": "C", "style": "S1", "score": 80.0,
+             "feature": {"close": 20.0}},
+        ]
+        desired = invoke(
+            "_desired_share_map", snapshot, {"S1": 0.25}, candidates, {}
+        ) or {}
+        self.assertEqual(desired, {"B": 12500, "C": 6200})
+
+    def test_allocation_metrics_report_planned_and_sizable_target_exposure(self):
+        candidates = [
+            {"code": "A", "feature": {"close": 10.0}},
+            {"code": "B", "feature": {"close": 20.0}},
+        ]
+        metrics = invoke(
+            "allocation_metrics", 1000000.0, {"S1": 0.25},
+            {"A": 12500, "B": 6200}, candidates,
+        )
+        self.assertAlmostEqual(metrics["planned_exposure"], 0.25)
+        self.assertAlmostEqual(metrics["target_exposure"], 0.249)
+        self.assertAlmostEqual(metrics["fill_rate"], 0.996)
+
 
 class IntradayAggregationTests(unittest.TestCase):
     @staticmethod
