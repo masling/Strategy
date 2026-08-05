@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.4.3_20260805_BACKTEST_CAPITAL_FALLBACK
+# DOWNLOAD_BUILD: V1.4.4_20260805_BACKTEST_T1_AVAILABLE
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_4_3"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_4_4"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -819,9 +819,91 @@ def _stock_selection(context, asof, sectors):
     return selected
 
 
+def _virtual_backtest_snapshot():
+    try:
+        accounts = get_trade_detail_data(
+            A.acct, A.acct_type, "account"
+        ) or []
+        positions = get_trade_detail_data(
+            A.acct, A.acct_type, "position"
+        ) or []
+    except Exception as error:
+        print("WARN virtual backtest account query failed:", error)
+        return None
+    if not accounts:
+        return None
+
+    account_data = accounts[0]
+    position_map = {}
+    for position in positions:
+        volume = int(getattr(position, "m_nVolume", 0))
+        if volume <= 0:
+            continue
+        code = (str(position.m_strInstrumentID) + "."
+                + str(position.m_strExchangeID))
+        available = int(getattr(position, "m_nCanUseVolume", 0))
+        position_map[code] = {
+            "volume": volume,
+            "available": max(0, min(volume, available)),
+            "open_price": float(getattr(position, "m_dOpenPrice", 0.0)),
+        }
+    snapshot = {
+        "balance": float(account_data.m_dBalance),
+        "available_cash": max(0.0, float(account_data.m_dAvailable)),
+        "positions": position_map,
+    }
+    print(
+        "PORTFOLIO", "source", "virtual_account",
+        "balance", snapshot["balance"],
+        "cash", snapshot["available_cash"],
+        "positions", len(position_map),
+    )
+    return snapshot
+
+
+def _record_code(record):
+    return str(record.stockcode) + "." + str(record.market)
+
+
+def _record_trade_day(value):
+    text = str(value or "").strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    digits = "".join(character for character in text
+                     if character.isdigit())
+    if len(digits) >= 14:
+        return digits[:8]
+    if len(digits) == 8:
+        return digits
+    if len(digits) == 13:
+        try:
+            formatted = timetag_to_datetime(int(digits), "%Y%m%d")
+            result = "".join(character for character in str(formatted)
+                             if character.isdigit())
+            if len(result) >= 8:
+                return result[:8]
+        except Exception:
+            pass
+    return ""
+
+
+def _backtest_trade_day(context):
+    try:
+        value = context.get_bar_timetag(context.barpos)
+    except Exception:
+        return ""
+    return _record_trade_day(value)
+
+
 def _backtest_snapshot(context):
+    virtual_snapshot = _virtual_backtest_snapshot()
+    if virtual_snapshot is not None:
+        return virtual_snapshot
     try:
         holdings = get_result_records("holdings", context.barpos, context) or []
+        dealdetails = get_result_records(
+            "dealdetails", context.barpos, context
+        ) or []
         net_value = float(context.get_net_value(context.barpos))
         capital, used_fallback = _backtest_capital(context)
     except Exception as error:
@@ -837,22 +919,36 @@ def _backtest_snapshot(context):
     balance = capital * net_value
     market_value = 0.0
     position_map = {}
+    same_day_buys = {}
+    current_trade_day = _backtest_trade_day(context)
+    for deal in dealdetails:
+        if int(getattr(deal, "open_close", -1)) != 1:
+            continue
+        deal_trade_day = _record_trade_day(
+            getattr(deal, "trade_date", "")
+        )
+        if (current_trade_day and deal_trade_day
+                and deal_trade_day != current_trade_day):
+            continue
+        code = _record_code(deal)
+        volume = max(0, int(getattr(deal, "position", 0)))
+        same_day_buys[code] = same_day_buys.get(code, 0) + volume
     for holding in holdings:
         volume = int(getattr(holding, "position", 0))
         if volume <= 0:
             continue
-        code = str(holding.stockcode) + "." + str(holding.market)
+        code = _record_code(holding)
         current_price = float(getattr(holding, "current_price", 0.0))
         open_price = float(getattr(holding, "trade_price", current_price))
         market_value += current_price * volume
         position_map[code] = {
             "volume": volume,
-            "available": volume,
+            "available": max(0, volume - same_day_buys.get(code, 0)),
             "open_price": open_price,
         }
     available_cash = max(0.0, balance - market_value)
     print(
-        "PORTFOLIO",
+        "PORTFOLIO", "source", "result_records",
         "capital", capital,
         "net_value", net_value,
         "balance", balance,
