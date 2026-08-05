@@ -473,12 +473,83 @@ class QmtAdapterTests(unittest.TestCase):
             else:
                 delattr(strategy, "timetag_to_datetime")
 
-    def test_backtest_snapshot_uses_backtest_records_without_logged_in_account(self):
+    def test_backtest_snapshot_uses_virtual_account_can_use_volume(self):
+        class FakeAccount(object):
+            m_dBalance = 1050000.0
+            m_dAvailable = 1040000.0
+
+        class FakePosition(object):
+            m_strInstrumentID = "000001"
+            m_strExchangeID = "SZ"
+            m_nVolume = 1000
+            m_nCanUseVolume = 0
+            m_dOpenPrice = 9.50
+            m_dLastPrice = 10.00
+
+        class FakeContext(object):
+            capital = 1000000.0
+            barpos = 20
+
+            @staticmethod
+            def get_net_value(index):
+                if index != 20:
+                    raise AssertionError("unexpected bar index")
+                return 1.05
+
+        original_trade = getattr(strategy, "get_trade_detail_data", None)
+        had_original_trade = hasattr(strategy, "get_trade_detail_data")
+        original_records = getattr(strategy, "get_result_records", None)
+        had_original_records = hasattr(strategy, "get_result_records")
+        strategy.A.mode = "BACKTEST"
+        strategy.A.acct = "test"
+        strategy.A.acct_type = "STOCK"
+
+        def fake_trade_detail(account, account_type, detail_type):
+            self.assertEqual((account, account_type), ("test", "STOCK"))
+            if detail_type == "account":
+                return [FakeAccount()]
+            if detail_type == "position":
+                return [FakePosition()]
+            raise AssertionError("unexpected detail type")
+
+        strategy.get_trade_detail_data = fake_trade_detail
+        strategy.get_result_records = lambda *args: (_ for _ in ()).throw(
+            AssertionError("virtual account data must take priority")
+        )
+        try:
+            snapshot = invoke("_account_snapshot", FakeContext())
+            self.assertEqual(snapshot["balance"], 1050000.0)
+            self.assertEqual(snapshot["available_cash"], 1040000.0)
+            self.assertEqual(
+                snapshot["positions"],
+                {"000001.SZ": {
+                    "volume": 1000,
+                    "available": 0,
+                    "open_price": 9.50,
+                }},
+            )
+        finally:
+            if had_original_trade:
+                strategy.get_trade_detail_data = original_trade
+            else:
+                delattr(strategy, "get_trade_detail_data")
+            if had_original_records:
+                strategy.get_result_records = original_records
+            else:
+                delattr(strategy, "get_result_records")
+
+    def test_backtest_snapshot_fallback_excludes_same_day_buys_from_available(self):
         class FakeHolding(object):
             market = "SZ"
             stockcode = "000001"
             trade_price = 9.50
             current_price = 10.00
+            position = 1000
+
+        class FakeDeal(object):
+            market = "SZ"
+            stockcode = "000001"
+            open_close = 1
             position = 1000
 
         class FakeContext(object):
@@ -499,15 +570,18 @@ class QmtAdapterTests(unittest.TestCase):
         strategy.A.acct = "test"
         strategy.A.acct_type = "STOCK"
 
-        def reject_trade_detail(*args):
-            raise AssertionError("backtest must not query a logged-in account")
+        def unavailable_trade_detail(*args):
+            return []
 
         def fake_result_records(record_type, index, context):
-            self.assertEqual((record_type, index), ("holdings", 20))
+            self.assertIn(record_type, ("holdings", "dealdetails"))
+            self.assertEqual(index, 20)
             self.assertIsInstance(context, FakeContext)
-            return [FakeHolding()]
+            if record_type == "holdings":
+                return [FakeHolding()]
+            return [FakeDeal()]
 
-        strategy.get_trade_detail_data = reject_trade_detail
+        strategy.get_trade_detail_data = unavailable_trade_detail
         strategy.get_result_records = fake_result_records
         try:
             snapshot = invoke("_account_snapshot", FakeContext())
@@ -517,7 +591,7 @@ class QmtAdapterTests(unittest.TestCase):
                 snapshot["positions"],
                 {"000001.SZ": {
                     "volume": 1000,
-                    "available": 1000,
+                    "available": 0,
                     "open_price": 9.50,
                 }},
             )
@@ -530,6 +604,71 @@ class QmtAdapterTests(unittest.TestCase):
                 strategy.get_result_records = original_records
             else:
                 delattr(strategy, "get_result_records")
+
+    def test_backtest_snapshot_fallback_keeps_prior_day_shares_available(self):
+        class FakeHolding(object):
+            market = "SZ"
+            stockcode = "000001"
+            trade_price = 9.50
+            current_price = 10.00
+            position = 1500
+
+        class FakeDeal(object):
+            market = "SZ"
+            stockcode = "000001"
+            open_close = 1
+
+            def __init__(self, trade_date, position):
+                self.trade_date = trade_date
+                self.position = position
+
+        class FakeContext(object):
+            capital = 1000000.0
+            barpos = 20
+
+            @staticmethod
+            def get_net_value(index):
+                return 1.0
+
+            @staticmethod
+            def get_bar_timetag(index):
+                return "20251014103000"
+
+        original_trade = getattr(strategy, "get_trade_detail_data", None)
+        had_original_trade = hasattr(strategy, "get_trade_detail_data")
+        original_records = getattr(strategy, "get_result_records", None)
+        had_original_records = hasattr(strategy, "get_result_records")
+        original_timetag = getattr(strategy, "timetag_to_datetime", None)
+        had_original_timetag = hasattr(strategy, "timetag_to_datetime")
+        strategy.A.mode = "BACKTEST"
+        strategy.A.acct = "test"
+        strategy.A.acct_type = "STOCK"
+        strategy.get_trade_detail_data = lambda *args: []
+        strategy.get_result_records = lambda record_type, *args: (
+            [FakeHolding()] if record_type == "holdings" else [
+                FakeDeal("20251013", 1000),
+                FakeDeal("20251014", 500),
+            ]
+        )
+        strategy.timetag_to_datetime = lambda value, fmt: str(value)[:8]
+        try:
+            snapshot = invoke("_account_snapshot", FakeContext())
+            self.assertEqual(
+                snapshot["positions"]["000001.SZ"]["available"], 1000
+            )
+        finally:
+            if had_original_trade:
+                strategy.get_trade_detail_data = original_trade
+            else:
+                delattr(strategy, "get_trade_detail_data")
+            if had_original_records:
+                strategy.get_result_records = original_records
+            else:
+                delattr(strategy, "get_result_records")
+            if had_original_timetag:
+                strategy.timetag_to_datetime = original_timetag
+            else:
+                delattr(strategy, "timetag_to_datetime")
 
     def test_backtest_snapshot_falls_back_when_context_capital_is_invalid(self):
         class FakeContext(object):
