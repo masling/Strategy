@@ -1,5 +1,7 @@
 import importlib.util
+import io
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import numpy as np
@@ -537,6 +539,48 @@ class QmtAdapterTests(unittest.TestCase):
                 strategy.get_result_records = original_records
             else:
                 delattr(strategy, "get_result_records")
+
+    def test_backtest_portfolio_log_is_printed_once_per_trade_day(self):
+        class FakeAccount(object):
+            m_dBalance = 1000000.0
+            m_dAvailable = 1000000.0
+
+        class FakeContext(object):
+            capital = 1000000.0
+            barpos = 20
+            trade_day = "20251014"
+
+            def get_bar_timetag(self, index):
+                self.assert_bar_index(index)
+                return self.trade_day + "103000"
+
+            @staticmethod
+            def assert_bar_index(index):
+                if index != 20:
+                    raise AssertionError("unexpected bar index")
+
+        original_trade = getattr(strategy, "get_trade_detail_data", None)
+        had_original_trade = hasattr(strategy, "get_trade_detail_data")
+        strategy.A.acct = "test"
+        strategy.A.acct_type = "STOCK"
+        strategy.A.last_portfolio_log_date = ""
+        strategy.get_trade_detail_data = lambda *args: (
+            [FakeAccount()] if args[-1] == "account" else []
+        )
+        context = FakeContext()
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                invoke("_backtest_snapshot", context)
+                invoke("_backtest_snapshot", context)
+                context.trade_day = "20251015"
+                invoke("_backtest_snapshot", context)
+            self.assertEqual(output.getvalue().count("PORTFOLIO"), 2)
+        finally:
+            if had_original_trade:
+                strategy.get_trade_detail_data = original_trade
+            else:
+                delattr(strategy, "get_trade_detail_data")
 
     def test_backtest_snapshot_fallback_excludes_same_day_buys_from_available(self):
         class FakeHolding(object):
