@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.6.1_20260806_MA40_STARTER_TREND_ADD
+# DOWNLOAD_BUILD: V1.6.2_20260806_BASE_RECLAIM_MA7_ADD
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_6_1"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_6_2"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -39,8 +39,12 @@ STARTER_POSITION_SCALE = 0.5
 STARTER_MAX_MA7_MA13_GAP = 0.02
 STARTER_MAX_DISTANCE_MA40 = 0.15
 STARTER_SUPPORT_TOLERANCE = 0.02
+STARTER_MIN_MA13_SLOPE_3D = -0.008
 TREND_ADD_WINDOW_DAYS = 15
 TREND_ADD_SUPPORT_TOLERANCE = 0.02
+BASE_RECLAIM_SUPPORT_TOLERANCE = 0.04
+BASE_RECLAIM_MAX_DISTANCE_MA40 = 0.15
+BASE_RECLAIM_RESUME_DAYS = 3
 ALLOW_CHINEXT = True
 ALLOW_STAR = False
 ALLOW_BSE = False
@@ -383,15 +387,31 @@ def entry_setup_kind(metrics):
         return "trend"
     ma40_starter = bool(
         close > ma13 > ma40
-        and ma13 > ma13_prev and ma40 > ma40_prev
-        and slope13 >= ENTRY_MIN_MA13_SLOPE_3D
+        and ma40 > ma40_prev
+        and slope13 >= STARTER_MIN_MA13_SLOPE_3D
         and ma7 >= ma13 * (1.0 - STARTER_MAX_MA7_MA13_GAP)
         and slope7 >= -0.02
         and abs(low / ma40 - 1.0) <= STARTER_SUPPORT_TOLERANCE
         and close > previous_high
         and distance40 <= STARTER_MAX_DISTANCE_MA40
     )
-    return "ma40_starter" if ma40_starter else None
+    if ma40_starter:
+        return "ma40_starter"
+    base_reclaim = bool(
+        close > ma7 > ma13 > ma40
+        and ma40 > ma40_prev
+        and slope7 >= ENTRY_MIN_MA7_SLOPE_3D
+        and STARTER_MIN_MA13_SLOPE_3D <= slope13 < ENTRY_MIN_MA13_SLOPE_3D
+        and min(abs(low / ma7 - 1.0), abs(low / ma13 - 1.0))
+        <= BASE_RECLAIM_SUPPORT_TOLERANCE
+        and close > previous_high
+        and distance40 <= BASE_RECLAIM_MAX_DISTANCE_MA40
+        and gap7 <= max(
+            ENTRY_MAX_MA7_MA13_GAP,
+            ENTRY_MAX_GAP_RATIO * gap13,
+        )
+    )
+    return "base_reclaim" if base_reclaim else None
 
 
 def stock_feature(frame, sector_return13, sector_return40,
@@ -727,26 +747,36 @@ def addback_trend_ready(metrics, peak_price=None):
     )
 
 
-def trend_add_ready(metrics, age):
+def trend_add_signal(metrics, age, setup=""):
     if not metrics or int(age) > TREND_ADD_WINDOW_DAYS:
-        return False
+        return None
     ma7 = float(metrics.get("ma7", 0.0))
     ma13 = float(metrics.get("ma13", 0.0))
     ma40 = float(metrics.get("ma40", 0.0))
     if not (ma7 > ma13 > ma40 > 0.0):
-        return False
+        return None
     if float(metrics.get("ma7_slope3", 0.0)) < ENTRY_MIN_MA7_SLOPE_3D:
-        return False
+        return None
     if float(metrics.get("ma13_slope3", 0.0)) < ENTRY_MIN_MA13_SLOPE_3D:
-        return False
+        return None
     low = float(metrics.get("low", 0.0))
     close = float(metrics.get("close", 0.0))
     previous_high = float(metrics.get("previous_high", 0.0))
-    return (
-        low > 0.0
-        and abs(low / ma13 - 1.0) <= TREND_ADD_SUPPORT_TOLERANCE
-        and close > previous_high > 0.0
-    )
+    if not (low > 0.0 and close > previous_high > 0.0):
+        return None
+    distance7 = abs(low / ma7 - 1.0)
+    distance13 = abs(low / ma13 - 1.0)
+    if min(distance7, distance13) <= TREND_ADD_SUPPORT_TOLERANCE:
+        return "ma7" if distance7 <= distance13 else "ma13"
+    if (str(setup) == "base_reclaim"
+            and int(age) <= BASE_RECLAIM_RESUME_DAYS
+            and close > ma7):
+        return "resume"
+    return None
+
+
+def trend_add_ready(metrics, age, setup=""):
+    return trend_add_signal(metrics, age, setup) is not None
 
 
 def _confirmed_30m_reversal(previous, latest):
@@ -1510,9 +1540,10 @@ def _rebalance_to_desired(context, snapshot, trade_date):
         if order_volume <= 0:
             retry = True
             continue
+        add_signal = A.trend_add_reasons.get(code)
         order_reason = (
-            "trend_add_ma13"
-            if code in A.trend_add_codes else "rebalance"
+            "trend_add_" + str(add_signal)
+            if add_signal else "rebalance"
         )
         if _send_order(
                 context, "buy", code, order_volume, trade_date,
@@ -1520,13 +1551,16 @@ def _rebalance_to_desired(context, snapshot, trade_date):
             sent_any = True
             retry = True
             cash -= order_volume * price
-            A.trend_add_codes.discard(code)
+            A.trend_add_reasons.pop(code, None)
             if (current <= 0
                     and float(A.entry_scales.get(code, 1.0)) < 0.999):
                 A.build_plans[code] = {
                     "start_date": str(trade_date),
                     "last_age_date": str(trade_date),
                     "age": 0,
+                    "setup": candidate_map.get(code, {}).get(
+                        "feature", {}
+                    ).get("entry_setup", ""),
                 }
             if code not in A.position_meta:
                 A.position_meta[code] = {
@@ -1553,7 +1587,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         A.daily_position_metrics = {}
         A.addback_plans = {}
         A.build_plans = {}
-        A.trend_add_codes = set()
+        A.trend_add_reasons = {}
         return False
     if not style_exposures:
         sent = False
@@ -1567,7 +1601,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         A.addback_plans = {}
         A.build_plans = {}
         A.entry_scales = {}
-        A.trend_add_codes = set()
+        A.trend_add_reasons = {}
         return sent
 
     history = fetch_history(
@@ -1643,7 +1677,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         A.addback_plans.pop(code, None)
         A.build_plans.pop(code, None)
         A.entry_scales.pop(code, None)
-        A.trend_add_codes.discard(code)
+        A.trend_add_reasons.pop(code, None)
         if _send_order(
                 context, "sell", code, position["available"],
                 trade_date, reason, A.execution_prices.get(code)):
@@ -1676,11 +1710,15 @@ def _activate_trend_adds(snapshot):
         if age > TREND_ADD_WINDOW_DAYS:
             A.build_plans.pop(code, None)
             continue
-        if not trend_add_ready(A.daily_position_metrics.get(code), age):
+        signal = trend_add_signal(
+            A.daily_position_metrics.get(code), age,
+            plan.get("setup", ""),
+        )
+        if signal is None:
             continue
         A.entry_scales[code] = 1.0
         A.build_plans.pop(code, None)
-        A.trend_add_codes.add(code)
+        A.trend_add_reasons[code] = signal
         activated = True
     return activated
 
@@ -1884,7 +1922,7 @@ def run_daily_cycle(context, asof, trade_date):
             A.entry_scales[code] = (
                 STARTER_POSITION_SCALE
                 if item.get("feature", {}).get("entry_setup")
-                == "ma40_starter" else 1.0
+                in ("ma40_starter", "base_reclaim") else 1.0
             )
         A.intraday_scales = {
             code: scale for code, scale in A.intraday_scales.items()
@@ -1999,7 +2037,7 @@ def init(context):
     A.daily_position_metrics = {}
     A.entry_scales = {}
     A.build_plans = {}
-    A.trend_add_codes = set()
+    A.trend_add_reasons = {}
     A.blocked_codes = set()
     A.owned_codes = set()
     A.sent_order_keys = set()

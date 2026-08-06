@@ -289,6 +289,62 @@ class StockSelectionTests(unittest.TestCase):
         }
         self.assertTrue(invoke("trend_add_ready", metrics, 10))
 
+    def test_salt_lake_december_17_flat_ma13_is_low_starter(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 26.98, "low": 25.67, "previous_high": 25.28,
+            "ma7": 25.49, "ma13": 25.62, "ma40": 25.52,
+            "ma13_prev": 25.8, "ma40_prev": 25.4,
+            "ma7_slope3": 0.001, "ma13_slope3": -0.007,
+            "distance_ma40": 26.98 / 25.52 - 1.0,
+            "ma7_ma13_gap": 25.49 / 25.62 - 1.0,
+            "ma13_ma40_gap": 25.62 / 25.52 - 1.0,
+        })
+        self.assertEqual(setup, "ma40_starter")
+
+    def test_salt_lake_december_31_adds_near_ma7(self):
+        metrics = {
+            "close": 28.16, "low": 27.98, "previous_high": 28.04,
+            "ma7": 28.25, "ma13": 27.41, "ma40": 26.46,
+            "ma7_slope3": 0.0099, "ma13_slope3": 0.0206,
+        }
+        self.assertEqual(
+            invoke("trend_add_signal", metrics, 8, "ma40_starter"),
+            "ma7",
+        )
+
+    def test_salt_lake_february_24_is_secondary_base_reclaim(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 35.66, "low": 34.51, "previous_high": 33.91,
+            "ma7": 33.65, "ma13": 33.28, "ma40": 32.22,
+            "ma13_prev": 33.5, "ma40_prev": 31.9,
+            "ma7_slope3": 0.021, "ma13_slope3": -0.006,
+            "distance_ma40": 35.66 / 32.22 - 1.0,
+            "ma7_ma13_gap": 33.65 / 33.28 - 1.0,
+            "ma13_ma40_gap": 33.28 / 32.22 - 1.0,
+        })
+        self.assertEqual(setup, "base_reclaim")
+
+    def test_secondary_base_can_complete_on_immediate_resume(self):
+        metrics = {
+            "close": 36.20, "low": 35.72, "previous_high": 35.83,
+            "ma7": 34.19, "ma13": 33.43, "ma40": 32.44,
+            "ma7_slope3": 0.034, "ma13_slope3": 0.003,
+        }
+        self.assertEqual(
+            invoke("trend_add_signal", metrics, 1, "base_reclaim"),
+            "resume",
+        )
+
+    def test_secondary_base_does_not_chase_resume_after_three_days(self):
+        metrics = {
+            "close": 36.20, "low": 35.72, "previous_high": 35.83,
+            "ma7": 34.19, "ma13": 33.43, "ma40": 32.44,
+            "ma7_slope3": 0.034, "ma13_slope3": 0.003,
+        }
+        self.assertIsNone(
+            invoke("trend_add_signal", metrics, 4, "base_reclaim")
+        )
+
     def test_position_metrics_remain_available_after_trend_break(self):
         frame = self.make_frame(last_close=130.0)
         frame.loc[frame.index[-1], "close"] = 100.0
