@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.5.5_20260806_ORDER_TIME_PRICE
+# DOWNLOAD_BUILD: V1.6.0_20260806_TREND_ENTRY_STAGED_ADDBACK
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_5"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_6_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -23,6 +23,18 @@ STYLE_STRONG_EXPOSURE = 0.25
 STYLE_WATCH_EXPOSURE = 0.10
 MAX_TOTAL_EXPOSURE = 0.80
 INTRADAY_REDUCE_RATIO = 1.0 / 3.0
+ENTRY_MAX_DISTANCE_MA40 = 0.25
+ENTRY_MAX_MA7_MA13_GAP = 0.035
+ENTRY_MAX_GAP_RATIO = 1.25
+ENTRY_MIN_MA7_SLOPE_3D = 0.003
+ENTRY_MIN_MA13_SLOPE_3D = 0.0015
+ADDBACK_WINDOW_DAYS = 3
+ADDBACK_FIRST_RATIO = 0.5
+ADDBACK_SUPPORT_TOLERANCE = 0.02
+ADDBACK_MIN_MA7_SLOPE_3D = 0.001
+ADDBACK_MIN_MA13_SLOPE_3D = 0.0005
+ADDBACK_MIN_DISTANCE_MA7 = 0.05
+ADDBACK_MIN_DISTANCE_MA13 = 0.08
 ALLOW_CHINEXT = True
 ALLOW_STAR = False
 ALLOW_BSE = False
@@ -359,6 +371,8 @@ def stock_feature(frame, sector_return13, sector_return40,
     ma7 = float(np.mean(close[-7:]))
     ma13 = float(np.mean(close[-13:]))
     ma40 = float(np.mean(close[-40:]))
+    ma7_prev3 = float(np.mean(close[-10:-3]))
+    ma13_prev3 = float(np.mean(close[-16:-3]))
     ma13_prev = float(np.mean(close[-18:-5]))
     ma40_prev = float(np.mean(close[-45:-5]))
     average_amount = float(np.mean(amount[-20:]))
@@ -366,6 +380,11 @@ def stock_feature(frame, sector_return13, sector_return40,
     r13 = _return(close, 13)
     r40 = _return(close, 40)
     distance_ma13 = close[-1] / ma13 - 1.0
+    distance_ma40 = close[-1] / ma40 - 1.0
+    ma7_ma13_gap = ma7 / ma13 - 1.0
+    ma13_ma40_gap = ma13 / ma40 - 1.0
+    ma7_slope3 = ma7 / ma7_prev3 - 1.0
+    ma13_slope3 = ma13 / ma13_prev3 - 1.0
     high40 = float(np.max(np.asarray(data["high"], dtype=float)[-40:]))
     high_proximity = close[-1] / high40 if high40 > 0 else 0.0
     atr = _atr(data, 14)
@@ -373,6 +392,16 @@ def stock_feature(frame, sector_return13, sector_return40,
     if not (close[-1] > ma7 > ma13 > ma40):
         return None
     if not (ma13 > ma13_prev and ma40 > ma40_prev):
+        return None
+    if ma7_slope3 < ENTRY_MIN_MA7_SLOPE_3D:
+        return None
+    if ma13_slope3 < ENTRY_MIN_MA13_SLOPE_3D:
+        return None
+    if distance_ma40 > ENTRY_MAX_DISTANCE_MA40:
+        return None
+    if ma7_ma13_gap > max(
+            ENTRY_MAX_MA7_MA13_GAP,
+            ENTRY_MAX_GAP_RATIO * ma13_ma40_gap):
         return None
     if average_amount < float(min_average_amount):
         return None
@@ -399,6 +428,11 @@ def stock_feature(frame, sector_return13, sector_return40,
         "rs13": rs13,
         "rs40": rs40,
         "distance_ma13": distance_ma13,
+        "distance_ma40": distance_ma40,
+        "ma7_ma13_gap": ma7_ma13_gap,
+        "ma13_ma40_gap": ma13_ma40_gap,
+        "ma7_slope3": ma7_slope3,
+        "ma13_slope3": ma13_slope3,
         "high_proximity": high_proximity,
         "average_amount": average_amount,
         "volatility": volatility,
@@ -417,12 +451,19 @@ def position_metrics(frame):
     if len(data) < 45:
         return None
     close = np.asarray(data["close"], dtype=float)
+    ma7 = float(np.mean(close[-7:]))
+    ma13 = float(np.mean(close[-13:]))
+    ma40 = float(np.mean(close[-40:]))
+    ma7_prev3 = float(np.mean(close[-10:-3]))
+    ma13_prev3 = float(np.mean(close[-16:-3]))
     return {
         "close": float(close[-1]),
         "high": float(data["high"].iloc[-1]),
-        "ma7": float(np.mean(close[-7:])),
-        "ma13": float(np.mean(close[-13:])),
-        "ma40": float(np.mean(close[-40:])),
+        "ma7": ma7,
+        "ma13": ma13,
+        "ma40": ma40,
+        "ma7_slope3": ma7 / ma7_prev3 - 1.0,
+        "ma13_slope3": ma13 / ma13_prev3 - 1.0,
         "atr": _atr(data, 14),
     }
 
@@ -447,6 +488,26 @@ def select_stocks(candidates, max_count=6, max_per_sector=2):
     return selected
 
 
+def entry_structure_score(feature):
+    distance_ma40 = max(0.0, float(feature.get("distance_ma40", 0.0)))
+    distance_ma13 = max(0.0, float(feature.get("distance_ma13", 0.0)))
+    gap7 = max(0.0, float(feature.get("ma7_ma13_gap", 0.0)))
+    gap13 = max(0.0, float(feature.get("ma13_ma40_gap", 0.0)))
+    slope7 = max(0.0, float(feature.get("ma7_slope3", 0.0)))
+    slope13 = max(0.0, float(feature.get("ma13_slope3", 0.0)))
+    distance_score = 1.0 - min(
+        1.0, 0.65 * distance_ma40 / ENTRY_MAX_DISTANCE_MA40
+        + 0.35 * distance_ma13 / 0.12,
+    )
+    gap_excess = max(0.0, gap7 - gap13)
+    gap_score = 1.0 - min(1.0, gap_excess / max(gap13, 0.02))
+    slope_score = min(1.0, 0.5 * slope7 / 0.018 + 0.5 * slope13 / 0.012)
+    return round(
+        0.40 * distance_score + 0.30 * gap_score + 0.30 * slope_score,
+        6,
+    )
+
+
 def score_stock_candidates(candidates):
     if not candidates:
         return []
@@ -467,16 +528,19 @@ def score_stock_candidates(candidates):
     scored = []
     for item in candidates:
         code = item["code"]
+        structure = entry_structure_score(item["feature"])
         score = (
-            30.0 * rank_fields["rs13"][code]
-            + 25.0 * rank_fields["rs40"][code]
-            + 15.0 * rank_fields["r13"][code]
-            + 10.0 * rank_fields["high_proximity"][code]
+            25.0 * rank_fields["rs13"][code]
+            + 20.0 * rank_fields["rs40"][code]
+            + 10.0 * rank_fields["r13"][code]
+            + 5.0 * rank_fields["high_proximity"][code]
             + 10.0 * rank_fields["average_amount"][code]
-            + 10.0 * volatility_rank[code]
+            + 5.0 * volatility_rank[code]
+            + 25.0 * structure
         )
         result = dict(item)
         result["score"] = round(score, 4)
+        result["entry_structure_score"] = structure
         scored.append(result)
     scored.sort(key=lambda item: item["score"], reverse=True)
     return scored
@@ -591,7 +655,36 @@ def aggregate_5m_to_30m(frame):
     return pd.DataFrame(bars, index=pd.DatetimeIndex(endpoints), columns=columns)
 
 
-def intraday_action(frame30, ma7, ma13, reduced):
+def addback_trend_ready(metrics, peak_price=None):
+    if not metrics:
+        return False
+    ma7 = float(metrics.get("ma7", 0.0))
+    ma13 = float(metrics.get("ma13", 0.0))
+    ma40 = float(metrics.get("ma40", 0.0))
+    if not (ma7 > ma13 > ma40 > 0.0):
+        return False
+    if float(metrics.get("ma7_slope3", 0.0)) < ADDBACK_MIN_MA7_SLOPE_3D:
+        return False
+    if float(metrics.get("ma13_slope3", 0.0)) < ADDBACK_MIN_MA13_SLOPE_3D:
+        return False
+    if peak_price is None:
+        return True
+    price = float(peak_price)
+    return (
+        price / ma7 - 1.0 >= ADDBACK_MIN_DISTANCE_MA7
+        and price / ma13 - 1.0 >= ADDBACK_MIN_DISTANCE_MA13
+    )
+
+
+def _confirmed_30m_reversal(previous, latest):
+    return (
+        float(latest["low"]) >= float(previous["low"])
+        and float(latest["close"]) > float(previous["high"])
+    )
+
+
+def intraday_action(frame30, ma7, ma13, reduced, trend_ready=True,
+                    addback_stage=0, addback_age=0):
     if frame30 is None or len(frame30) < 2:
         return None
     data = frame30.replace([np.inf, -np.inf], np.nan).dropna(
@@ -602,13 +695,27 @@ def intraday_action(frame30, ma7, ma13, reduced):
     previous = data.iloc[-2]
     latest = data.iloc[-1]
     if reduced:
-        near_support = any(
-            level > 0.0 and abs(float(previous["low"]) / level - 1.0) <= 0.02
-            for level in (float(ma7), float(ma13))
+        if not trend_ready or int(addback_age) > ADDBACK_WINDOW_DAYS:
+            return None
+        if not _confirmed_30m_reversal(previous, latest):
+            return None
+        near_ma7 = (
+            float(ma7) > 0.0
+            and abs(float(previous["low"]) / float(ma7) - 1.0)
+            <= ADDBACK_SUPPORT_TOLERANCE
         )
-        if (near_support and float(latest["low"]) >= float(previous["low"])
-                and float(latest["close"]) > float(previous["high"])):
-            return "add"
+        near_ma13 = (
+            float(ma13) > 0.0
+            and abs(float(previous["low"]) / float(ma13) - 1.0)
+            <= ADDBACK_SUPPORT_TOLERANCE
+        )
+        if int(addback_stage) <= 0 and near_ma7:
+            return "add_ma7"
+        if near_ma13:
+            return "add_ma13"
+        if (int(addback_stage) == 1
+                and float(latest["close"]) > float(ma7)):
+            return "add_resume"
         return None
     if len(data) < 22:
         return None
@@ -1074,7 +1181,7 @@ def _send_order(context, side, code, volume, trade_date, reason, price=None):
     volume = int(volume)
     if volume <= 0:
         return False
-    key = (str(trade_date), str(code), str(side))
+    key = (str(trade_date), str(code), str(side), str(reason))
     if key in A.sent_order_keys:
         return False
     remark = str(trade_date) + "_" + side + "_" + str(reason)
@@ -1161,9 +1268,6 @@ def _raw_execution_prices(context, codes, field="open"):
             continue
         if np.isfinite(price) and price > 0.0:
             result[code] = price
-    missing = sorted(set(codes or []) - set(result.keys()))
-    if missing:
-        print("WARNING raw execution price missing:", missing)
     return result
 
 
@@ -1358,6 +1462,8 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
     positions = _managed_positions(snapshot)
     if not positions:
         A.position_meta = {}
+        A.daily_position_metrics = {}
+        A.addback_plans = {}
         return False
     if not style_exposures:
         sent = False
@@ -1368,6 +1474,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
                     trade_date, "style_risk",
                     A.execution_prices.get(code)):
                 sent = True
+        A.addback_plans = {}
         return sent
 
     history = fetch_history(
@@ -1376,11 +1483,35 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
     )
     sent = False
     active_codes = set()
+    A.daily_position_metrics = {}
     for code, position in positions.items():
         active_codes.add(code)
         metrics = position_metrics(history.get(code))
         if metrics is None:
             continue
+        A.daily_position_metrics[code] = metrics
+        plan = A.addback_plans.get(code)
+        if plan and int(plan.get("age", 0)) > ADDBACK_WINDOW_DAYS:
+            planned_added = int(plan.get("added_volume", 0))
+            added_volume = min(
+                int(position.get("available", 0)),
+                planned_added,
+            )
+            if planned_added <= 0:
+                A.addback_plans.pop(code, None)
+            elif added_volume > 0 and metrics["close"] >= metrics["ma7"]:
+                current = int(position.get("volume", 0))
+                original = max(int(plan.get("original_volume", current)), 1)
+                if _send_order(
+                        context, "sell", code, added_volume, trade_date,
+                        "addback_timeout", A.execution_prices.get(code)):
+                    sent = True
+                    A.desired_shares[code] = max(0, current - added_volume)
+                    A.intraday_scales[code] = max(
+                        0.0, float(current - added_volume) / original
+                    )
+                    A.addback_plans.pop(code, None)
+                continue
         meta = A.position_meta.get(code)
         if meta is None:
             entry = position["open_price"] if position["open_price"] > 0 else metrics["close"]
@@ -1416,6 +1547,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         A.desired_shares[code] = 0
         A.blocked_codes.add(code)
         A.intraday_scales.pop(code, None)
+        A.addback_plans.pop(code, None)
         if _send_order(
                 context, "sell", code, position["available"],
                 trade_date, reason, A.execution_prices.get(code)):
@@ -1424,6 +1556,15 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         if code not in active_codes and code not in A.desired_shares:
             del A.position_meta[code]
     return sent
+
+
+def _advance_addback_plans(trade_date):
+    for plan in A.addback_plans.values():
+        if str(plan.get("last_age_date", "")) == str(trade_date):
+            continue
+        if str(plan.get("start_date", "")) != str(trade_date):
+            plan["age"] = int(plan.get("age", 0)) + 1
+        plan["last_age_date"] = str(trade_date)
 
 
 def _print_daily_summary(trade_date, market, sectors, candidates):
@@ -1474,8 +1615,13 @@ def run_intraday_cycle(context, end_time, trade_date):
         feature = candidate["feature"]
         bars30 = aggregate_5m_to_30m(history.get(code))
         reduced = float(A.intraday_scales.get(code, 1.0)) < 0.999
+        plan = A.addback_plans.get(code)
+        daily_metrics = A.daily_position_metrics.get(code, feature)
         action = intraday_action(
-            bars30, feature["ma7"], feature["ma13"], reduced
+            bars30, daily_metrics["ma7"], daily_metrics["ma13"], reduced,
+            addback_trend_ready(daily_metrics),
+            int((plan or {}).get("stage", 0)),
+            int((plan or {}).get("age", ADDBACK_WINDOW_DAYS + 1)),
         )
         if action == "reduce":
             current = int(positions[code].get("volume", 0))
@@ -1490,8 +1636,31 @@ def run_intraday_cycle(context, end_time, trade_date):
                 remaining_ratio = max(0.0, float(current - volume) / current)
                 A.intraday_scales[code] = remaining_ratio
                 A.desired_shares[code] = current - volume
-                print("INTRADAY", trade_date, code, "reduce", volume)
-        elif action == "add":
+                peak_price = (
+                    float(bars30.iloc[-2]["high"])
+                    if len(bars30) >= 2 else execution_prices.get(code)
+                )
+                if addback_trend_ready(daily_metrics, peak_price):
+                    first_volume = max(
+                        100,
+                        int(
+                            volume * ADDBACK_FIRST_RATIO / 100.0
+                        ) * 100,
+                    )
+                    first_volume = min(first_volume, volume)
+                    A.addback_plans[code] = {
+                        "start_date": str(trade_date),
+                        "last_age_date": str(trade_date),
+                        "age": 0,
+                        "stage": 0,
+                        "original_volume": current,
+                        "reduced_volume": volume,
+                        "first_volume": first_volume,
+                        "added_volume": 0,
+                    }
+                else:
+                    A.addback_plans.pop(code, None)
+        elif action in ("add_ma7", "add_ma13", "add_resume") and plan:
             previous_scale = float(A.intraday_scales.get(code, 1.0))
             A.intraday_scales[code] = 1.0
             base_desired = _desired_share_map(
@@ -1502,7 +1671,15 @@ def run_intraday_cycle(context, end_time, trade_date):
             price = _execution_price(
                 code, candidate_map, tick_map, "buy", execution_prices
             )
-            volume = int((base_desired - current) / 100.0) * 100
+            missing = int((base_desired - current) / 100.0) * 100
+            if int(plan.get("stage", 0)) <= 0:
+                planned_volume = int(plan.get("first_volume", 0))
+            else:
+                planned_volume = (
+                    int(plan.get("reduced_volume", 0))
+                    - int(plan.get("added_volume", 0))
+                )
+            volume = min(missing, int(planned_volume / 100.0) * 100)
             affordable = int(
                 float(snapshot["available_cash"]) * 0.98
                 / max(price, 1e-12) / 100.0
@@ -1513,9 +1690,22 @@ def run_intraday_cycle(context, end_time, trade_date):
                 continue
             if _send_order(
                     context, "buy", code, volume, trade_date,
-                    "intraday_addback", price):
-                A.desired_shares[code] = base_desired
-                print("INTRADAY", trade_date, code, "add", volume)
+                    "intraday_" + action, price):
+                plan["added_volume"] = int(plan.get("added_volume", 0)) + volume
+                remaining = (
+                    int(plan.get("reduced_volume", 0))
+                    - int(plan.get("added_volume", 0))
+                )
+                restored = current + volume
+                A.desired_shares[code] = restored
+                if remaining < 100 or restored >= base_desired:
+                    A.intraday_scales[code] = 1.0
+                    A.addback_plans.pop(code, None)
+                else:
+                    plan["stage"] = 1
+                    A.intraday_scales[code] = max(
+                        0.0, float(restored) / max(base_desired, 1)
+                    )
             else:
                 A.intraday_scales[code] = previous_scale
 
@@ -1528,6 +1718,7 @@ def run_daily_cycle(context, asof, trade_date):
     if snapshot is None:
         return
     _refresh_owned_codes(snapshot)
+    _advance_addback_plans(trade_date)
 
     style_changed = style_exposures != A.last_style_exposures
     rebalance_due = A.rebalance_age >= REBALANCE_EVERY or style_changed
@@ -1662,6 +1853,8 @@ def init(context):
     A.desired_shares = {}
     A.position_meta = {}
     A.intraday_scales = {}
+    A.addback_plans = {}
+    A.daily_position_metrics = {}
     A.blocked_codes = set()
     A.owned_codes = set()
     A.sent_order_keys = set()
@@ -1672,7 +1865,7 @@ def init(context):
     A.last_portfolio_log_date = ""
     A.actual_backtest_start = None
     A.actual_backtest_end = None
-    A.last_range_log_date = ""
+    A.range_logged = False
     print("INIT", STRATEGY_NAME, A.mode, A.acct, A.acct_type)
     if A.mode == "BACKTEST":
         print(
@@ -1701,18 +1894,18 @@ def handlebar(context):
             A.actual_backtest_start = bar_time
         A.actual_backtest_end = bar_time
         trade_date = bar_time.strftime("%Y%m%d")
-        range_due = bar_time.strftime("%H%M%S") >= "150000"
+        range_due = False
         try:
-            range_due = range_due or bool(context.is_last_bar())
+            range_due = bool(context.is_last_bar())
         except Exception:
             pass
-        if range_due and A.last_range_log_date != trade_date:
+        if range_due and not A.range_logged:
             print(
                 "BACKTEST_RANGE", "start",
                 A.actual_backtest_start.strftime("%Y-%m-%d %H:%M:%S"),
                 "end", A.actual_backtest_end.strftime("%Y-%m-%d %H:%M:%S"),
             )
-            A.last_range_log_date = trade_date
+            A.range_logged = True
         asof = (bar_time - datetime.timedelta(days=1)).strftime("%Y%m%d")
     else:
         if not context.is_last_bar():

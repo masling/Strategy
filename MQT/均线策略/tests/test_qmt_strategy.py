@@ -231,6 +231,44 @@ class StockSelectionTests(unittest.TestCase):
         )
         self.assertIsNone(feature)
 
+    def test_stock_feature_rejects_flat_ma7_after_prior_rally(self):
+        close = np.concatenate([np.linspace(80.0, 125.0, 118),
+                                np.repeat(130.0, 12)])
+        frame = pd.DataFrame({
+            "close": close, "high": close * 1.01, "low": close * 0.99,
+            "amount": np.repeat(100000000.0, len(close)),
+            "volume": np.repeat(1000000.0, len(close)),
+            "suspendFlag": np.zeros(len(close)),
+        })
+        self.assertIsNone(invoke("stock_feature", frame, 0.01, 0.03))
+
+    def test_stock_feature_rejects_price_far_above_ma40(self):
+        close = np.concatenate([np.linspace(60.0, 80.0, 110),
+                                np.linspace(82.0, 125.0, 20)])
+        frame = pd.DataFrame({
+            "close": close, "high": close * 1.01, "low": close * 0.99,
+            "amount": np.repeat(100000000.0, len(close)),
+            "volume": np.repeat(1000000.0, len(close)),
+            "suspendFlag": np.zeros(len(close)),
+        })
+        self.assertIsNone(invoke("stock_feature", frame, 0.01, 0.03))
+
+    def test_entry_structure_score_prefers_smooth_lower_position(self):
+        smooth = {
+            "distance_ma40": 0.12, "distance_ma13": 0.03,
+            "ma7_ma13_gap": 0.025, "ma13_ma40_gap": 0.08,
+            "ma7_slope3": 0.012, "ma13_slope3": 0.008,
+        }
+        high = {
+            "distance_ma40": 0.24, "distance_ma13": 0.11,
+            "ma7_ma13_gap": 0.08, "ma13_ma40_gap": 0.04,
+            "ma7_slope3": 0.003, "ma13_slope3": 0.002,
+        }
+        self.assertGreater(
+            invoke("entry_structure_score", smooth),
+            invoke("entry_structure_score", high),
+        )
+
     def test_position_metrics_remain_available_after_trend_break(self):
         frame = self.make_frame(last_close=130.0)
         frame.loc[frame.index[-1], "close"] = 100.0
@@ -412,7 +450,7 @@ class IntradayAggregationTests(unittest.TestCase):
             invoke("intraday_action", frame, 9.5, 9.0, False), "reduce"
         )
 
-    def test_30m_reversal_near_daily_support_adds_reduced_part_back(self):
+    def test_30m_reversal_near_ma7_starts_staged_addback(self):
         frame = pd.DataFrame({
             "open": [10.1, 10.2],
             "high": [10.3, 10.6],
@@ -422,7 +460,54 @@ class IntradayAggregationTests(unittest.TestCase):
             "amount": [1000.0, 1200.0],
         }, index=pd.to_datetime(["2026-08-03 10:00", "2026-08-03 10:30"]))
         self.assertEqual(
-            invoke("intraday_action", frame, 10.0, 9.7, True), "add"
+            invoke("intraday_action", frame, 10.0, 9.7, True), "add_ma7"
+        )
+
+    def test_addback_resumes_remaining_tranche_after_ma7_rebound(self):
+        frame = pd.DataFrame({
+            "open": [10.1, 10.2], "high": [10.3, 10.7],
+            "low": [9.95, 10.0], "close": [10.1, 10.6],
+            "volume": [100.0, 120.0], "amount": [1000.0, 1200.0],
+        }, index=pd.to_datetime(["2026-08-03 10:00", "2026-08-03 10:30"]))
+        self.assertEqual(
+            invoke("intraday_action", frame, 10.0, 9.7, True,
+                   True, 1, 2),
+            "add_resume",
+        )
+
+    def test_addback_is_disabled_after_three_trading_days(self):
+        frame = pd.DataFrame({
+            "open": [10.1, 10.2], "high": [10.3, 10.6],
+            "low": [9.95, 10.0], "close": [10.1, 10.5],
+            "volume": [100.0, 120.0], "amount": [1000.0, 1200.0],
+        })
+        self.assertIsNone(
+            invoke("intraday_action", frame, 10.0, 9.7, True,
+                   True, 0, 4)
+        )
+
+    def test_addback_requires_smooth_daily_ma7_and_ma13(self):
+        smooth = {
+            "ma7": 11.0, "ma13": 10.0, "ma40": 9.0,
+            "ma7_slope3": 0.01, "ma13_slope3": 0.006,
+        }
+        flat = dict(smooth, ma7_slope3=0.0)
+        self.assertTrue(invoke("addback_trend_ready", smooth, 11.6))
+        self.assertFalse(invoke("addback_trend_ready", flat, 11.6))
+
+    def test_addback_window_counts_trading_days_once(self):
+        strategy.A.addback_plans = {
+            "000001.SZ": {
+                "start_date": "20260803", "last_age_date": "20260803",
+                "age": 0,
+            },
+        }
+        invoke("_advance_addback_plans", "20260804")
+        invoke("_advance_addback_plans", "20260804")
+        invoke("_advance_addback_plans", "20260805")
+        invoke("_advance_addback_plans", "20260806")
+        self.assertEqual(
+            strategy.A.addback_plans["000001.SZ"]["age"], 3
         )
 
 
