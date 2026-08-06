@@ -26,7 +26,26 @@ function movingAverages(rows, periods) {
   });
 }
 
-export function drawCandles(canvas, rows, selectedDate, orders = [], sourceRows = rows) {
+function tradeDate(value) {
+  return String(value || '').replace(/\D/g, '').slice(0, 8);
+}
+
+function rowForTrade(rows, order) {
+  const date = tradeDate(order.date);
+  const sameDay = rows.map((row, index) => ({ row, index, digits: String(row.time || '').replace(/\D/g, '') }))
+    .filter(item => item.digits.slice(0, 8) === date);
+  if (!sameDay.length) return null;
+  if (!order.time || sameDay[0].digits.length < 12) return sameDay[0].index;
+  const orderClock = String(order.time).padStart(6, '0').slice(0, 4);
+  return (sameDay.find(item => item.digits.slice(8, 12) >= orderClock) || sameDay.at(-1)).index;
+}
+
+function clockLabel(order) {
+  const clock = String(order.time || '');
+  return clock.length === 6 ? `${clock.slice(0, 2)}:${clock.slice(2, 4)}` : '';
+}
+
+export function drawCandles(canvas, rows, orders = [], sourceRows = rows) {
   const { ctx, width, height } = setup(canvas); ctx.clearRect(0, 0, width, height);
   if (!rows.length) return empty(ctx, width, height, '暂无K线数据');
   const pad = { l: 46, r: 16, t: 20, b: 34 }, chartH = height - pad.t - pad.b;
@@ -43,14 +62,34 @@ export function drawCandles(canvas, rows, selectedDate, orders = [], sourceRows 
     const py = pad.t + chartH * i / 4; ctx.beginPath(); ctx.moveTo(pad.l, py); ctx.lineTo(width - pad.r, py); ctx.stroke();
     ctx.fillText((max - (max - min) * i / 4).toFixed(2), 3, py + 4);
   }
+  const tradesByIndex = new Map();
+  orders.forEach(order => {
+    const index = rowForTrade(rows, order);
+    if (index == null) return;
+    const trades = tradesByIndex.get(index) || [];
+    trades.push(order);
+    tradesByIndex.set(index, trades);
+  });
   rows.forEach((r, i) => {
     const x = pad.l + step * (i + .5), color = r.close >= r.open ? COLORS.up : COLORS.down;
     ctx.strokeStyle = color; ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(x, y(r.high)); ctx.lineTo(x, y(r.low)); ctx.stroke();
     const top = y(Math.max(r.open, r.close)), bottom = y(Math.min(r.open, r.close));
     ctx.fillRect(x - Math.max(1, step * .28), top, Math.max(2, step * .56), Math.max(1, bottom - top));
-    if (r.time.replaceAll('-', '').startsWith(selectedDate) && orders.length) {
-      ctx.fillStyle = orders.some(o => o.side === 'buy') ? '#ffcf5c' : '#6fb7ff';
-      ctx.beginPath(); ctx.moveTo(x, y(r.low) + 14); ctx.lineTo(x - 5, y(r.low) + 23); ctx.lineTo(x + 5, y(r.low) + 23); ctx.fill();
+    const trades = tradesByIndex.get(i) || [];
+    const buy = trades.find(order => order.side === 'buy');
+    const sell = trades.find(order => order.side === 'sell');
+    ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center';
+    if (buy) {
+      const markerY = Math.min(height - pad.b - 4, y(r.low) + 13);
+      ctx.fillStyle = '#ffcf5c'; ctx.beginPath();
+      ctx.moveTo(x, markerY); ctx.lineTo(x - 5, markerY + 8); ctx.lineTo(x + 5, markerY + 8); ctx.fill();
+      ctx.fillText(`B${clockLabel(buy) ? ` ${clockLabel(buy)}` : ''}`, x, markerY + 19);
+    }
+    if (sell) {
+      const markerY = Math.max(pad.t + 4, y(r.high) - 13);
+      ctx.fillStyle = '#65d6bc'; ctx.beginPath();
+      ctx.moveTo(x, markerY); ctx.lineTo(x - 5, markerY - 8); ctx.lineTo(x + 5, markerY - 8); ctx.fill();
+      ctx.fillText(`S${clockLabel(sell) ? ` ${clockLabel(sell)}` : ''}`, x, markerY - 11);
     }
   });
   const drawAverage = (period, color) => {

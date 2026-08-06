@@ -1,4 +1,4 @@
-import { parseQmtLog } from './parser.mjs?v=20260806-stats1';
+import { parseQmtLog } from './parser.mjs?v=20260806-stats-range1';
 import { fetchDaily, fetchThirtyMinute } from './market-data.mjs';
 import { drawCandles } from './chart.mjs';
 import { sampleLog } from './sample-log.js';
@@ -57,6 +57,17 @@ function renderTables(day) {
   document.querySelectorAll('[data-code]').forEach(row => row.addEventListener('click', () => selectStock(day.targets.find(x => x.code === row.dataset.code))));
 }
 
+function stockTrading(code) {
+  return state.report?.stocks?.find(stock => stock.code === code) || null;
+}
+
+function populateStockSelect() {
+  const stocks = state.report?.stocks || [];
+  $('#chartStockSelect').innerHTML = stocks.length
+    ? stocks.map(stock => `<option value="${stock.code}">${stock.code}${stock.name ? ` ${stock.name}` : ''} · ${stock.orders.length}笔</option>`).join('')
+    : '<option value="">无买卖记录</option>';
+}
+
 function diagnostic() {
   const meta = state.report.meta;
   $('#diagnosticText').textContent = [`回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, ...meta.warnings].join('\n');
@@ -64,25 +75,35 @@ function diagnostic() {
 
 async function selectStock(stock) {
   if (!stock) { state.stock = null; $('#chartTitle').textContent = '当日没有可选个股'; return; }
-  state.stock = stock; renderTables(state.day); $('#chartTitle').textContent = `${stock.code} ${stock.name || ''}`;
-  const trades = [...state.day.orders.filter(x => x.code === stock.code), ...state.day.intraday.filter(x => x.code === stock.code).map(x => ({ side: x.action === 'add' ? 'buy' : 'sell', volume: x.volume, reason: `intraday_${x.action}` }))];
-  $('#tradeChips').innerHTML = trades.length ? trades.map(x => `<span class="chip ${x.side}">${x.side === 'buy' ? '买入' : '卖出'} ${money(x.volume)}股 · ${x.reason}</span>`).join('') : '<span class="empty">所选日期没有该股委托记录</span>';
+  const trading = stockTrading(stock.code);
+  state.stock = trading ? { ...stock, ...trading, name: trading.name || stock.name || '' } : stock;
+  renderTables(state.day); $('#chartTitle').textContent = `${state.stock.code} ${state.stock.name || ''}`;
+  const stockOption = $('#chartStockSelect').querySelector(`option[value="${state.stock.code}"]`);
+  if (stockOption) $('#chartStockSelect').value = state.stock.code;
+  const trades = trading?.orders || [];
+  $('#tradeChips').innerHTML = trades.length
+    ? `<span class="chip buy">买入 ${trading.buyCount}笔 · ${money(trading.buyVolume)}股</span><span class="chip sell">卖出 ${trading.sellCount}笔 · ${money(trading.sellVolume)}股</span><span class="trade-range">${trades[0].date} — ${trades.at(-1).date}</span>`
+    : '<span class="empty">该股在回测日志中没有委托记录</span>';
   await renderChart(trades);
 }
 
 async function renderChart(trades = []) {
   if (!state.stock) return;
-  const key = `${state.chartType}:${state.stock.code}:${state.day.date}`;
+  const endDate = trades.at(-1)?.date || state.day.date;
+  const startDate = trades[0]?.date || state.day.date;
+  const key = `${state.chartType}:${state.stock.code}:${startDate}:${endDate}`;
   $('#chartLoading').classList.remove('hidden'); $('#chartLoading').textContent = '正在获取腾讯财经行情…';
   try {
     let rows = state.cache.get(key);
     if (!rows) {
       rows = state.chartType === 'daily'
-        ? await fetchDaily(state.stock.code, state.day.date)
-        : await fetchThirtyMinute(state.stock.code, state.day.date);
+        ? await fetchDaily(state.stock.code, endDate, startDate)
+        : await fetchThirtyMinute(state.stock.code, endDate);
       state.cache.set(key, rows);
     }
-    if (key !== `${state.chartType}:${state.stock.code}:${state.day.date}`) return;
+    const latestEndDate = stockTrading(state.stock.code)?.orders.at(-1)?.date || state.day.date;
+    const latestStartDate = stockTrading(state.stock.code)?.orders[0]?.date || state.day.date;
+    if (key !== `${state.chartType}:${state.stock.code}:${latestStartDate}:${latestEndDate}`) return;
     state.chartRows = rows; state.chartTrades = trades;
     redrawChart();
     $('#chartLoading').classList.add('hidden');
@@ -104,15 +125,15 @@ function chartViewport() {
 function redrawChart() {
   if (!state.stock) return;
   if (!state.chartRows.length) {
-    drawCandles($('#chart'), [], state.day.date, []);
+    drawCandles($('#chart'), [], []);
     $('#chartRange').textContent = state.chartType === '30m'
       ? '腾讯财经暂未返回该股票的近期 30 分钟K数据。'
       : '该交易日暂无日K数据。';
     return;
   }
   const rows = chartViewport();
-  drawCandles($('#chart'), rows, state.day.date, state.chartTrades, state.chartRows);
-  const periodNote = state.chartType === 'daily' ? '按回测日期截断' : '腾讯近期分钟行情';
+  drawCandles($('#chart'), rows, state.chartTrades, state.chartRows);
+  const periodNote = state.chartType === 'daily' ? '全部买卖日期' : '腾讯近期分钟行情';
   $('#chartRange').textContent = `${state.chartType === 'daily' ? '日K' : '30 分钟K'} · ${periodNote} · 显示 ${rows.length} 根（${rows[0].time} — ${rows.at(-1).time}）。滚轮缩放，图内拖动查看区间，右侧边缘调整宽度。`;
 }
 
@@ -141,7 +162,9 @@ function selectDay(date) {
   state.day = state.report.days.find(x => x.date === date) || state.report.days.at(-1);
   if (!state.day) return;
   $('#dateSelect').value = state.day.date; renderMarket(state.day); renderAllocation(state.day);
-  state.stock = state.day.targets[0] || null; renderTables(state.day); selectStock(state.stock);
+  const currentStock = state.stock && stockTrading(state.stock.code) ? state.stock : null;
+  state.stock = currentStock || state.day.targets[0] || state.report.stocks[0] || null;
+  renderTables(state.day); selectStock(state.stock);
 }
 
 function parse() {
@@ -149,7 +172,7 @@ function parse() {
   const count = state.report.days.length;
   $('#sourceStatus').textContent = count ? `已解析 ${count} 个交易日 · ${state.report.meta.startTime || '未知'} 至 ${state.report.meta.endTime || '未知'}` : '未识别到策略日志';
   $('#dateSelect').innerHTML = state.report.days.map(x => `<option value="${x.date}">${x.date.slice(0,4)}-${x.date.slice(4,6)}-${x.date.slice(6)}</option>`).join('');
-  renderOverview(); diagnostic(); if (count) { $('.import-panel').classList.remove('open'); selectDay(state.report.days.at(-1).date); } else $('.import-panel').classList.add('open');
+  populateStockSelect(); renderOverview(); diagnostic(); if (count) { $('.import-panel').classList.remove('open'); selectDay(state.report.days.at(-1).date); } else $('.import-panel').classList.add('open');
 }
 
 $('#sampleButton').addEventListener('click', () => { $('#logInput').value = sampleLog; $('.import-panel').classList.add('open'); parse(); });
@@ -157,6 +180,10 @@ $('#parseButton').addEventListener('click', parse);
 $('#logInput').addEventListener('focus', () => $('.import-panel').classList.add('open'));
 $('#fileInput').addEventListener('change', async event => { const file = event.target.files[0]; if (!file) return; $('#logInput').value = await file.text(); parse(); });
 $('#dateSelect').addEventListener('change', event => selectDay(event.target.value));
+$('#chartStockSelect').addEventListener('change', event => {
+  const stock = stockTrading(event.target.value);
+  if (stock) selectStock(stock);
+});
 document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(x => { const active = x === tab; x.classList.toggle('active', active); x.setAttribute('aria-pressed', String(active)); });
   state.chartType = tab.dataset.chart; selectStock(state.stock);

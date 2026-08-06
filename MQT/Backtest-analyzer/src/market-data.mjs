@@ -33,9 +33,10 @@ function rows(payload, code, field) {
   }).filter(row => Number.isFinite(row.open) && Number.isFinite(row.close) && Number.isFinite(row.high) && Number.isFinite(row.low));
 }
 
-export async function fetchDaily(code, endDate = '') {
+export async function fetchDaily(code, endDate = '', startDate = '') {
   const end = dateText(endDate) || '2050-01-01';
-  const payload = await tencent('fqkline/get', `${tencentCode(code)},day,${dateBefore(endDate, 380)},${end},160,qfq`);
+  const start = dateBefore(startDate || endDate, startDate ? 90 : 900);
+  const payload = await tencent('fqkline/get', `${tencentCode(code)},day,${start},${end},640,qfq`);
   return rows(payload, code, 'qfqday');
 }
 

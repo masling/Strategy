@@ -68,3 +68,50 @@ STATE 20250102 exposure 0 style_exposures {} scores {}`);
   assert.equal(result.meta.startTime, '2025-01-02 09:35:00');
   assert.equal(result.meta.endTime, '2025-01-06 15:00:00');
 });
+
+test('annualizes return using the actual backtest date range instead of sparse asset snapshots', () => {
+  const result = parseQmtLog(`BACKTEST_RANGE start 2025-08-01 09:35:00 end 2026-08-03 15:00:00
+PORTFOLIO source result_records capital 1000000 balance 1000000 cash 1000000 positions 0
+STATE 20250801 exposure 0 style_exposures {} scores {}
+STATE 20260105 exposure 0 style_exposures {} scores {}
+PORTFOLIO source result_records capital 1000000 balance 1232447 cash 1232447 positions 0
+STATE 20260803 exposure 0 style_exposures {} scores {}`);
+  const expected = Math.pow(1.232447, 365 / 367) - 1;
+  assert.equal(result.statistics.tradingDays, 3);
+  assert.ok(Math.abs(result.statistics.totalReturn - 0.232447) < 1e-12);
+  assert.ok(Math.abs(result.statistics.annualizedReturn - expected) < 1e-12);
+  assert.ok(result.statistics.annualizedReturn < 0.24);
+});
+
+test('groups every buy and sell order by stock across trading days', () => {
+  const result = parseQmtLog(`STATE 20250801 exposure 0.8 style_exposures {} scores {}
+TARGETS [('growth', '002755.SZ', '奥赛康', 91.2)]
+ORDER 20250801 buy 002755.SZ 2000 rebalance
+ORDER 20250804 sell 002755.SZ 600 intraday_top
+STATE 20250804 exposure 0.7 style_exposures {} scores {}
+ORDER 20250805 sell 002755.SZ 1400 sector_rotation`);
+  assert.equal(result.stocks.length, 1);
+  assert.equal(result.stocks[0].name, '奥赛康');
+  assert.equal(result.stocks[0].buyCount, 1);
+  assert.equal(result.stocks[0].sellCount, 2);
+  assert.equal(result.stocks[0].buyVolume, 2000);
+  assert.equal(result.stocks[0].sellVolume, 2000);
+  assert.deepEqual(result.stocks[0].orders.map(order => order.date), ['20250801', '20250804', '20250805']);
+});
+
+test('keeps traded stocks even when they never appear in targets', () => {
+  const result = parseQmtLog(`ORDER 20250801 buy 600000.SH 1000 rebalance`);
+  assert.equal(result.stocks[0].code, '600000.SH');
+  assert.equal(result.stocks[0].name, '');
+});
+
+test('parses order time and submitted price while keeping old logs compatible', () => {
+  const result = parseQmtLog(`ORDER 20250801 100500 buy 002755.SZ 2000 price 28.13 rebalance
+ORDER 20250804 sell 002755.SZ 600 intraday_top`);
+  assert.deepEqual(result.stocks[0].orders[0], {
+    date: '20250801', time: '100500', side: 'buy', code: '002755.SZ',
+    volume: 2000, price: 28.13, reason: 'rebalance',
+  });
+  assert.equal(result.stocks[0].orders[1].time, '');
+  assert.equal(result.stocks[0].orders[1].price, null);
+});

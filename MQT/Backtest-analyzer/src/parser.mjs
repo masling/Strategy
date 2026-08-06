@@ -62,7 +62,21 @@ function engineMeta(line) {
   };
 }
 
-function performance(days) {
+function calendarDay(value) {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  return Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function annualizationExponent(meta, tradingDays) {
+  const start = calendarDay(meta?.startTime);
+  const end = calendarDay(meta?.endTime);
+  const elapsedDays = start != null && end != null ? (end - start) / 86400000 : 0;
+  if (elapsedDays > 0) return 365 / elapsedDays;
+  return tradingDays > 0 ? 252 / tradingDays : null;
+}
+
+function performance(days, meta) {
   const assets = days.map(day => day.portfolio?.balance).filter(value => Number.isFinite(value) && value > 0);
   if (!assets.length) return { tradingDays: days.length, initialAsset: null, finalAsset: null, totalReturn: null, annualizedReturn: null, maxDrawdown: null, sharpe: null };
   const loggedCapital = days.map(day => day.portfolio?.capital).find(value => Number.isFinite(value) && value > 0);
@@ -72,11 +86,40 @@ function performance(days) {
   let peak = curve[0], maxDrawdown = 0;
   curve.forEach(value => { peak = Math.max(peak, value); maxDrawdown = Math.min(maxDrawdown, value / peak - 1); });
   const totalReturn = finalAsset / initialAsset - 1;
-  const annualizedReturn = returns.length ? Math.pow(finalAsset / initialAsset, 252 / returns.length) - 1 : null;
+  const exponent = annualizationExponent(meta, days.length);
+  const annualizedReturn = exponent == null ? null : Math.pow(finalAsset / initialAsset, exponent) - 1;
   const average = returns.length ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null;
   const variance = returns.length > 1 ? returns.reduce((sum, value) => sum + Math.pow(value - average, 2), 0) / (returns.length - 1) : null;
   const sharpe = variance > 0 ? average / Math.sqrt(variance) * Math.sqrt(252) : null;
   return { tradingDays: days.length, initialAsset, finalAsset, totalReturn, annualizedReturn, maxDrawdown, sharpe };
+}
+
+function stockTrading(days) {
+  const stocks = new Map();
+  const stockFor = code => {
+    if (!stocks.has(code)) stocks.set(code, { code, name: '', styles: [], orders: [] });
+    return stocks.get(code);
+  };
+  days.forEach(day => {
+    day.targets.forEach(target => {
+      const stock = stockFor(target.code);
+      if (target.name) stock.name = target.name;
+      if (target.style && !stock.styles.includes(target.style)) stock.styles.push(target.style);
+    });
+    day.orders.forEach(order => {
+      stockFor(order.code).orders.push({ ...order, date: day.date });
+    });
+  });
+  return [...stocks.values()]
+    .filter(stock => stock.orders.length)
+    .map(stock => ({
+      ...stock,
+      buyCount: stock.orders.filter(order => order.side === 'buy').length,
+      sellCount: stock.orders.filter(order => order.side === 'sell').length,
+      buyVolume: stock.orders.filter(order => order.side === 'buy').reduce((sum, order) => sum + order.volume, 0),
+      sellVolume: stock.orders.filter(order => order.side === 'sell').reduce((sum, order) => sum + order.volume, 0),
+    }))
+    .sort((a, b) => b.orders.length - a.orders.length || a.code.localeCompare(b.code));
 }
 
 export function parseQmtLog(raw) {
@@ -136,8 +179,12 @@ export function parseQmtLog(raw) {
         fillRate: numberAfter(line, 'fill_rate'), unallocatedCash: numberAfter(line, 'unallocated_cash'),
       };
     } else if (line.startsWith('ORDER ')) {
-      const match = line.match(/^ORDER\s+(\d{8})\s+(buy|sell)\s+(\S+)\s+(\d+)\s*(.*)$/i);
-      if (match) dayFor(match[1]).orders.push({ side: match[2], code: match[3], volume: Number(match[4]), reason: match[5] });
+      const match = line.match(/^ORDER\s+(\d{8})(?:\s+(\d{6}))?\s+(buy|sell)\s+(\S+)\s+(\d+)(?:\s+price\s+(-?\d+(?:\.\d+)?))?\s*(.*)$/i);
+      if (match) dayFor(match[1]).orders.push({
+        time: match[2] || '', side: match[3].toLowerCase(), code: match[4],
+        volume: Number(match[5]), price: match[6] == null ? null : Number(match[6]),
+        reason: match[7],
+      });
     } else if (line.startsWith('INTRADAY ')) {
       const match = line.match(/^INTRADAY\s+(\d{8})\s+(\S+)\s+(reduce|add)\s+(\d+)/);
       if (match) dayFor(match[1]).intraday.push({ code: match[2], action: match[3], volume: Number(match[4]) });
@@ -147,5 +194,5 @@ export function parseQmtLog(raw) {
   const sortedDays = [...days.values()].sort((a, b) => a.date.localeCompare(b.date));
   if (!meta.startTime) meta.startTime = dateTime(meta.firstBar) || dateTime(sortedDays[0]?.date);
   if (!meta.endTime) meta.endTime = dateTime(sortedDays.at(-1)?.date);
-  return { meta, statistics: performance(sortedDays), days: sortedDays };
+  return { meta, statistics: performance(sortedDays, meta), days: sortedDays, stocks: stockTrading(sortedDays) };
 }

@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QMT 回测分析器</title><link rel="stylesheet" href="./styles.css"><style>@media(min-width:801px){.chart-card{position:relative;width:min(980px,100%);min-width:620px;max-width:100%;justify-self:start}.data-note{padding-right:14px}.chart-resize-handle{position:absolute;top:18px;right:-7px;bottom:18px;width:14px;cursor:ew-resize;touch-action:none;z-index:1}.chart-resize-handle:after{content:"";position:absolute;top:42%;left:5px;width:3px;height:54px;border-radius:4px;background:linear-gradient(var(--line),var(--blue),var(--line));opacity:.65}.chart-resize-handle:hover:after,.chart-resize-handle:focus-visible:after{opacity:1;box-shadow:0 0 0 3px rgba(111,183,255,.18)}}.chart-shell{user-select:none}.chart-shell canvas{cursor:grab;outline:none}.chart-shell canvas:active{cursor:grabbing}@media(max-width:800px){.chart-card{width:100%;min-width:0}.chart-resize-handle{display:none}}</style></head>
 <body>
-  <style>.overview-panel{min-height:0}.overview-grid{grid-template-columns:repeat(4,1fr)}@media(max-width:800px){.overview-grid{grid-template-columns:repeat(2,1fr)}}</style>
+  <style>.overview-panel{min-height:0}.overview-grid{grid-template-columns:repeat(4,1fr)}.chart-head{gap:16px}.chart-actions{display:flex;align-items:end;gap:10px;flex-wrap:wrap;justify-content:flex-end}.stock-picker{color:var(--muted);font-size:12px}.stock-picker select{display:block;margin:4px 0 0;min-width:230px;max-width:330px}.trade-range{color:var(--muted);font-size:12px;margin-left:4px}@media(max-width:800px){.overview-grid{grid-template-columns:repeat(2,1fr)}.chart-head{flex-direction:column}.chart-actions{width:100%;justify-content:space-between}.stock-picker{flex:1}.stock-picker select{width:100%;min-width:0}}</style>
   <header><div><span class="eyebrow">QMT STRATEGY LAB</span><h1>回测分析器</h1><p>把策略日志还原为大盘、板块、个股与交易点的时间切片。</p></div><div class="status" id="sourceStatus">等待导入日志</div></header>
   <main>
     <section class="import-panel">
@@ -23,13 +23,13 @@
     </section>
 
     <section id="chartCard" class="chart-card">
-      <div class="chart-head"><div><div class="section-title"><span>05</span>行情与买卖点</div><h2 id="chartTitle">选择个股</h2></div><div class="tabs"><button class="tab active" data-chart="daily" aria-pressed="true">日K</button><button class="tab" data-chart="30m" aria-pressed="false">30 分钟K</button></div></div>
+      <div class="chart-head"><div><div class="section-title"><span>05</span>按股票查看全部买卖点</div><h2 id="chartTitle">选择个股</h2></div><div class="chart-actions"><label class="stock-picker">股票<select id="chartStockSelect"><option value="">无买卖记录</option></select></label><div class="tabs"><button class="tab active" data-chart="daily" aria-pressed="true">日K</button><button class="tab" data-chart="30m" aria-pressed="false">30 分钟K</button></div></div></div>
       <div id="tradeChips" class="trade-chips"></div><div class="chart-shell"><canvas id="chart" tabindex="0" aria-label="行情K线图：滚轮缩放，拖动查看前后区间"></canvas><div id="chartLoading" class="chart-loading hidden"></div></div>
-      <p id="chartRange" class="data-note">行情来自腾讯财经公开接口；日K按所选回测日期截断，30 分钟K展示腾讯可提供的近期区间。滚轮缩放，图内拖动查看区间，右侧边缘调整宽度。</p>
+      <p id="chartRange" class="data-note">行情来自腾讯财经公开接口；B表示买入委托，S表示卖出委托，标记同时显示委托时间。日K展示该股回测期间的全部买卖点，30分钟K只能标注腾讯可提供的近期区间。</p>
       <div id="chartResizeHandle" class="chart-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整行情图表宽度" tabindex="0"></div>
     </section>
 
     <section class="diagnostics"><details><summary>解析信息与警告</summary><pre id="diagnosticText"></pre></details></section>
   </main>
-  <script type="module" src="./app.mjs?v=20260806-stats1"></script>
+  <script type="module" src="./app.mjs?v=20260806-stats-range1"></script>
 </body></html>
