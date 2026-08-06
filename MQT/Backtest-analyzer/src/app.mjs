@@ -6,6 +6,7 @@ import { sampleLog } from './sample-log.js';
 const $ = (selector) => document.querySelector(selector);
 const state = { report: null, day: null, stock: null, chartType: 'daily', cache: new Map() };
 const styles = { large: '大盘', mid: '中盘', small: '小盘', growth: '成长' };
+const indexes = { '000300.SH': '沪深300', '000905.SH': '中证500', '000852.SH': '中证1000', '399006.SZ': '创业板' };
 const pct = value => value == null ? '—' : `${(value * 100).toFixed(1)}%`;
 const money = value => value == null ? '—' : new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(value);
 
@@ -21,8 +22,12 @@ function metric(label, value) { return `<div class="metric"><small>${label}</sma
 function renderMarket(day) {
   if (!day?.state) { $('#marketView').innerHTML = '当日没有 STATE 记录'; return; }
   const exposure = day.state.exposure || 0;
-  const bars = Object.entries(day.state.styleExposures || {}).map(([name, value]) => `<div class="style-row"><span>${styles[name] || name}</span><div class="bar"><i style="width:${Math.min(100, value * 100)}%"></i></div><b>${pct(value)}</b></div>`).join('');
-  $('#marketView').innerHTML = `<div class="exposure-ring" style="--value:${exposure * 100}"><strong>${pct(exposure)}</strong></div><div class="style-bars"><b>${marketLabel(exposure)}</b>${bars || '<p class="empty">无风格仓位</p>'}</div>`;
+  const scores = Object.entries(day.state.scores || {}).map(([code, raw]) => {
+    const score = typeof raw === 'object' ? raw?.score : raw;
+    return `${indexes[code] || code} ${Number(score).toFixed(0)}`;
+  }).join(' · ');
+  const bars = Object.entries(day.state.styleExposures || {}).map(([name, value]) => `<div class="style-row"><span>${indexes[name] || styles[name] || name}</span><div class="bar"><i style="width:${Math.min(100, value * 100)}%"></i></div><b>${pct(value)}</b></div>`).join('');
+  $('#marketView').innerHTML = `<div class="exposure-ring" style="--value:${exposure * 100}"><strong>${pct(exposure)}</strong></div><div class="style-bars"><b>${marketLabel(exposure)}</b><div class="score">${scores}</div>${bars || '<p class="empty">无风格仓位</p>'}</div>`;
 }
 
 function renderAllocation(day) {
