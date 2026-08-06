@@ -539,32 +539,53 @@ class QmtAdapterTests(unittest.TestCase):
     def test_backtest_order_accepts_precomputed_price_outside_universe(self):
         class FakeContext(object):
             accountID = "testS"
+            barpos = 12
 
             @staticmethod
             def get_history_data(*args):
                 raise AssertionError("explicit price must avoid universe lookup")
 
+            @staticmethod
+            def get_bar_timetag(index):
+                if index != 12:
+                    raise AssertionError("unexpected bar index")
+                return 20260806100500
+
         original = getattr(strategy, "order_shares", None)
         had_original = hasattr(strategy, "order_shares")
+        original_timetag = getattr(strategy, "timetag_to_datetime", None)
+        had_original_timetag = hasattr(strategy, "timetag_to_datetime")
         calls = []
         strategy.A.mode = "BACKTEST"
         strategy.A.sent_order_keys = set()
         strategy.A.owned_codes = set()
         strategy.order_shares = lambda *args: calls.append(args)
+        strategy.timetag_to_datetime = lambda *args: "20260806100500"
         context = FakeContext()
+        output = io.StringIO()
         try:
-            self.assertTrue(invoke(
-                "_send_order", context, "buy", "002755.SZ", 1000,
-                "20260806", "rebalance", 13.25,
-            ))
+            with redirect_stdout(output):
+                self.assertTrue(invoke(
+                    "_send_order", context, "buy", "002755.SZ", 1000,
+                    "20260806", "rebalance", 13.25,
+                ))
             self.assertEqual(calls, [
                 ("002755.SZ", 1000, "fix", 13.25, context, "testS"),
             ])
+            self.assertIn(
+                "ORDER 20260806 100500 buy 002755.SZ 1000 "
+                "price 13.25 rebalance",
+                output.getvalue(),
+            )
         finally:
             if had_original:
                 strategy.order_shares = original
             else:
                 delattr(strategy, "order_shares")
+            if had_original_timetag:
+                strategy.timetag_to_datetime = original_timetag
+            else:
+                delattr(strategy, "timetag_to_datetime")
 
     def test_simulation_order_keeps_passorder_execution_path(self):
         class FakeContext(object):

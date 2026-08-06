@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.5.4_20260806_RAW_EXECUTION_PRICES
+# DOWNLOAD_BUILD: V1.5.5_20260806_ORDER_TIME_PRICE
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_4"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_5"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -1078,6 +1078,7 @@ def _send_order(context, side, code, volume, trade_date, reason, price=None):
     if key in A.sent_order_keys:
         return False
     remark = str(trade_date) + "_" + side + "_" + str(reason)
+    logged_price = price
     try:
         if A.mode == "BACKTEST":
             signed_volume = volume if side == "buy" else -volume
@@ -1090,6 +1091,7 @@ def _send_order(context, side, code, volume, trade_date, reason, price=None):
             if fixed_price is None:
                 print("ERROR backtest order skipped, invalid price:", code)
                 return False
+            logged_price = fixed_price
             order_shares(code, signed_volume, "fix", fixed_price,
                          context, context.accountID)
         else:
@@ -1104,7 +1106,24 @@ def _send_order(context, side, code, volume, trade_date, reason, price=None):
     A.sent_order_keys.add(key)
     if side == "buy":
         A.owned_codes.add(code)
-    print("ORDER", trade_date, side, code, volume, reason)
+    try:
+        timetag = context.get_bar_timetag(context.barpos)
+        order_text = timetag_to_datetime(timetag, "%Y%m%d%H%M%S")
+        order_digits = "".join(
+            character for character in str(order_text)
+            if character.isdigit()
+        )
+        order_time = order_digits[8:14] if len(order_digits) >= 14 else "000000"
+    except Exception:
+        order_time = datetime.datetime.now().strftime("%H%M%S")
+    try:
+        logged_price = round(float(logged_price), 4)
+    except (TypeError, ValueError):
+        logged_price = -1
+    print(
+        "ORDER", trade_date, order_time, side, code, volume,
+        "price", logged_price, reason,
+    )
     return True
 
 
