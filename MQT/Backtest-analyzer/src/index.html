@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QMT 回测分析器</title><link rel="stylesheet" href="./styles.css"></head>
+<body>
+  <header><div><span class="eyebrow">QMT STRATEGY LAB</span><h1>回测分析器</h1><p>把策略日志还原为大盘、板块、个股与交易点的时间切片。</p></div><div class="status" id="sourceStatus">等待导入日志</div></header>
+  <main>
+    <section class="import-panel">
+      <div class="toolbar"><label class="file-button">导入 .log / .txt<input id="fileInput" type="file" accept=".log,.txt,text/plain"></label><button id="sampleButton">载入示例</button><button id="parseButton" class="primary">解析日志</button><label class="date-label">交易日<select id="dateSelect"></select></label></div>
+      <textarea id="logInput" spellcheck="false" placeholder="粘贴 QMT 完整回测输出，或导入日志文件……"></textarea>
+    </section>
+
+    <section class="summary-grid">
+      <article class="market-card"><div class="section-title"><span>01</span>大盘全局判断</div><div id="marketView" class="market-view empty">导入日志后显示</div></article>
+      <article><div class="section-title"><span>02</span>资金与执行</div><div id="allocationView" class="metric-grid empty">暂无数据</div></article>
+    </section>
+
+    <section class="rank-grid">
+      <article><div class="section-title"><span>03</span>板块评分</div><div class="table-wrap"><table><thead><tr><th>风格</th><th>板块</th><th>评分</th></tr></thead><tbody id="sectorRows"></tbody></table></div></article>
+      <article><div class="section-title"><span>04</span>个股评分</div><div class="table-wrap"><table><thead><tr><th>代码 / 名称</th><th>风格</th><th>评分</th><th>目标股数</th></tr></thead><tbody id="stockRows"></tbody></table></div></article>
+    </section>
+
+    <section class="chart-card">
+      <div class="chart-head"><div><div class="section-title"><span>05</span>行情与买卖点</div><h2 id="chartTitle">选择个股</h2></div><div class="tabs"><button class="tab active" data-chart="daily">日K</button><button class="tab" data-chart="intraday">分时</button></div></div>
+      <div id="tradeChips" class="trade-chips"></div><div class="chart-shell"><canvas id="chart"></canvas><div id="chartLoading" class="chart-loading hidden"></div></div>
+      <p class="data-note">行情来自东方财富公开接口；日K按所选回测日期截断，分时仅代表最近交易日，不冒充历史分时。</p>
+    </section>
+
+    <section class="diagnostics"><details><summary>解析信息与警告</summary><pre id="diagnosticText"></pre></details></section>
+  </main>
+  <script type="module" src="./app.mjs"></script>
+</body></html>
