@@ -329,7 +329,7 @@ class RiskAndSizingTests(unittest.TestCase):
         ]
         desired = invoke(
             "_desired_share_map", snapshot, {"S1": 0.25, "S2": 0.10},
-            candidates, {},
+            candidates, {}, {"A": 10.0, "B": 20.0, "C": 10.0},
         )
         self.assertEqual(desired, {"A": 12500, "B": 6200, "C": 10000})
 
@@ -346,7 +346,8 @@ class RiskAndSizingTests(unittest.TestCase):
              "feature": {"close": 20.0}},
         ]
         desired = invoke(
-            "_desired_share_map", snapshot, {"S1": 0.25}, candidates, {}
+            "_desired_share_map", snapshot, {"S1": 0.25}, candidates, {},
+            {"EXPENSIVE": 2000.0, "B": 10.0, "C": 20.0},
         ) or {}
         self.assertEqual(desired, {"B": 12500, "C": 6200})
 
@@ -358,6 +359,7 @@ class RiskAndSizingTests(unittest.TestCase):
         metrics = invoke(
             "allocation_metrics", 1000000.0, {"S1": 0.25},
             {"A": 12500, "B": 6200}, candidates,
+            {"A": 10.0, "B": 20.0},
         )
         self.assertAlmostEqual(metrics["planned_exposure"], 0.25)
         self.assertAlmostEqual(metrics["target_exposure"], 0.249)
@@ -425,6 +427,55 @@ class IntradayAggregationTests(unittest.TestCase):
 
 
 class QmtAdapterTests(unittest.TestCase):
+    def test_backtest_execution_price_never_falls_back_to_adjusted_close(self):
+        strategy.A.mode = "BACKTEST"
+        candidates = {
+            "000001.SZ": {"feature": {"close": 934.0}},
+        }
+        self.assertEqual(invoke(
+            "_execution_price", "000001.SZ", candidates, {}, "buy",
+            {"000001.SZ": 20.0},
+        ), 20.0)
+        self.assertEqual(invoke(
+            "_execution_price", "000001.SZ", candidates, {}, "buy", {},
+        ), 0.0)
+
+    def test_raw_execution_price_query_disables_price_adjustment(self):
+        class FakeContext(object):
+            barpos = 12
+
+            @staticmethod
+            def get_bar_timetag(index):
+                if index != 12:
+                    raise AssertionError("unexpected bar index")
+                return 20260806100500
+
+            def get_market_data_ex(self, fields, stocks, **kwargs):
+                self.kwargs = kwargs
+                return {
+                    "000001.SZ": pd.DataFrame({
+                        "open": [20.0], "close": [20.5],
+                    }),
+                }
+
+        original = getattr(strategy, "timetag_to_datetime", None)
+        had_original = hasattr(strategy, "timetag_to_datetime")
+        strategy.timetag_to_datetime = lambda *args: "20260806100500"
+        context = FakeContext()
+        try:
+            prices = invoke(
+                "_raw_execution_prices", context, ["000001.SZ"], "open"
+            ) or {}
+            self.assertEqual(prices, {"000001.SZ": 20.0})
+            self.assertEqual(context.kwargs["period"], "5m")
+            self.assertEqual(context.kwargs["count"], 1)
+            self.assertEqual(context.kwargs["dividend_type"], "none")
+        finally:
+            if had_original:
+                strategy.timetag_to_datetime = original
+            else:
+                delattr(strategy, "timetag_to_datetime")
+
     def test_backtest_init_uses_qmt_compatible_test_account(self):
         class FakeContext(object):
             period = "5m"

@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.5.3_20260806_QMT_FIXED_PRICE_ORDERS
+# DOWNLOAD_BUILD: V1.5.4_20260806_RAW_EXECUTION_PRICES
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_3"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_4"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -1118,7 +1118,38 @@ def _simulation_tick(context, codes):
         return {}
 
 
-def _execution_price(code, candidate_map, tick_map, side):
+def _raw_execution_prices(context, codes, field="open"):
+    try:
+        timetag = context.get_bar_timetag(context.barpos)
+        text = timetag_to_datetime(timetag, "%Y%m%d%H%M%S")
+        digits = "".join(character for character in str(text)
+                         if character.isdigit())
+        end_time = digits[:14]
+    except Exception as error:
+        print("ERROR raw execution time unavailable:", error)
+        return {}
+    history = fetch_history(
+        context, ["open", "close"], sorted(set(codes or [])),
+        "5m", 1, end_time, "none", 100,
+    )
+    result = {}
+    for code, frame in history.items():
+        if frame is None or len(frame) == 0 or field not in frame.columns:
+            continue
+        try:
+            price = float(frame[field].iloc[-1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if np.isfinite(price) and price > 0.0:
+            result[code] = price
+    missing = sorted(set(codes or []) - set(result.keys()))
+    if missing:
+        print("WARNING raw execution price missing:", missing)
+    return result
+
+
+def _execution_price(code, candidate_map, tick_map, side,
+                     execution_prices=None):
     tick = tick_map.get(code, {})
     if tick:
         if side == "buy":
@@ -1129,6 +1160,11 @@ def _execution_price(code, candidate_map, tick_map, side):
             return float(prices[0])
         if float(tick.get("lastPrice", 0.0)) > 0:
             return float(tick["lastPrice"])
+    raw_price = float((execution_prices or {}).get(code, 0.0))
+    if raw_price > 0.0:
+        return raw_price
+    if A.mode == "BACKTEST":
+        return 0.0
     candidate = candidate_map.get(code)
     if candidate:
         return float(candidate["feature"].get("close", 0.0))
@@ -1152,7 +1188,8 @@ def _buy_is_tradeable(code, tick):
     return price / previous < limit_ratio - 0.002
 
 
-def _desired_share_map(snapshot, style_exposures, candidates, tick_map):
+def _desired_share_map(snapshot, style_exposures, candidates, tick_map,
+                       execution_prices=None):
     desired = {}
     if not candidates or not style_exposures:
         return desired
@@ -1173,7 +1210,9 @@ def _desired_share_map(snapshot, style_exposures, candidates, tick_map):
             continue
         if style_counts.get(style, 0) >= MAX_STOCKS_PER_STYLE:
             continue
-        price = _execution_price(code, candidate_map, tick_map, "buy")
+        price = _execution_price(
+            code, candidate_map, tick_map, "buy", execution_prices
+        )
         if target_shares(
                 snapshot["balance"], style_exposure, 1,
                 price, MAX_STOCK_WEIGHT) < 100:
@@ -1187,7 +1226,9 @@ def _desired_share_map(snapshot, style_exposures, candidates, tick_map):
         style_count = int(style_counts.get(style, 0))
         if style_exposure <= 0.0 or style_count <= 0:
             continue
-        price = _execution_price(code, candidate_map, tick_map, "buy")
+        price = _execution_price(
+            code, candidate_map, tick_map, "buy", execution_prices
+        )
         shares = target_shares(
             snapshot["balance"], style_exposure, style_count,
             price, MAX_STOCK_WEIGHT
@@ -1200,10 +1241,10 @@ def _desired_share_map(snapshot, style_exposures, candidates, tick_map):
 
 
 def allocation_metrics(total_asset, style_exposures, desired_shares,
-                       candidates):
+                       candidates, execution_prices=None):
     total = float(total_asset)
     planned = sum(float(value) for value in (style_exposures or {}).values())
-    prices = {
+    prices = dict(execution_prices or {}) or {
         item["code"]: float(item.get("feature", {}).get("close", 0.0))
         for item in candidates or []
     }
@@ -1242,9 +1283,7 @@ def _rebalance_to_desired(context, snapshot, trade_date):
             continue
         raw_volume = min(available, current - desired)
         volume = raw_volume if desired == 0 else int(raw_volume / 100) * 100
-        price = float(positions.get(code, {}).get("current_price", 0.0))
-        if price <= 0.0:
-            price = float(positions.get(code, {}).get("open_price", 0.0))
+        price = float(A.execution_prices.get(code, 0.0))
         if _send_order(context, "sell", code, volume, trade_date,
                        "rebalance", price):
             sent_any = True
@@ -1261,7 +1300,9 @@ def _rebalance_to_desired(context, snapshot, trade_date):
         volume = int((desired - current) / 100) * 100
         if volume <= 0 or code in sold_codes:
             continue
-        price = _execution_price(code, candidate_map, tick_map, "buy")
+        price = _execution_price(
+            code, candidate_map, tick_map, "buy", A.execution_prices
+        )
         if price <= 0 or not _buy_is_tradeable(code, tick_map.get(code, {})):
             retry = True
             continue
@@ -1306,7 +1347,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
             if _send_order(
                     context, "sell", code, position["available"],
                     trade_date, "style_risk",
-                    position.get("current_price") or position["open_price"]):
+                    A.execution_prices.get(code)):
                 sent = True
         return sent
 
@@ -1358,7 +1399,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         A.intraday_scales.pop(code, None)
         if _send_order(
                 context, "sell", code, position["available"],
-                trade_date, reason, metrics["close"]):
+                trade_date, reason, A.execution_prices.get(code)):
             sent = True
     for code in list(A.position_meta.keys()):
         if code not in active_codes and code not in A.desired_shares:
@@ -1408,6 +1449,7 @@ def run_intraday_cycle(context, end_time, trade_date):
         codes, "5m", 150, end_time, "back_ratio", 100,
     )
     tick_map = _simulation_tick(context, codes)
+    execution_prices = _raw_execution_prices(context, codes, "close")
     for code in codes:
         candidate = candidate_map[code]
         feature = candidate["feature"]
@@ -1425,7 +1467,7 @@ def run_intraday_cycle(context, end_time, trade_date):
                 continue
             if _send_order(
                     context, "sell", code, volume, trade_date,
-                    "intraday_top", float(bars30["close"].iloc[-1])):
+                    "intraday_top", execution_prices.get(code)):
                 remaining_ratio = max(0.0, float(current - volume) / current)
                 A.intraday_scales[code] = remaining_ratio
                 A.desired_shares[code] = current - volume
@@ -1435,10 +1477,12 @@ def run_intraday_cycle(context, end_time, trade_date):
             A.intraday_scales[code] = 1.0
             base_desired = _desired_share_map(
                 snapshot, A.current_style_exposures,
-                A.target_candidates, tick_map,
+                A.target_candidates, tick_map, execution_prices,
             ).get(code, 0)
             current = int(positions[code].get("volume", 0))
-            price = _execution_price(code, candidate_map, tick_map, "buy")
+            price = _execution_price(
+                code, candidate_map, tick_map, "buy", execution_prices
+            )
             volume = int((base_desired - current) / 100.0) * 100
             affordable = int(
                 float(snapshot["available_cash"]) * 0.98
@@ -1507,13 +1551,21 @@ def run_daily_cycle(context, asof, trade_date):
         tick_map = _simulation_tick(
             context, [item["code"] for item in A.target_candidates]
         )
+        execution_codes = (
+            set(_managed_positions(snapshot).keys())
+            | {item["code"] for item in A.target_candidates}
+        )
+        A.execution_prices = _raw_execution_prices(
+            context, execution_codes, "open"
+        )
         A.desired_shares = _desired_share_map(
-            snapshot, style_exposures, A.target_candidates, tick_map
+            snapshot, style_exposures, A.target_candidates, tick_map,
+            A.execution_prices,
         )
         print("DESIRED", trade_date, A.desired_shares)
         allocation = allocation_metrics(
             snapshot["balance"], style_exposures,
-            A.desired_shares, A.target_candidates
+            A.desired_shares, A.target_candidates, A.execution_prices
         )
         print(
             "ALLOCATION", trade_date,
@@ -1523,6 +1575,15 @@ def run_daily_cycle(context, asof, trade_date):
             "unallocated_cash", allocation["unallocated_cash"],
         )
         A.rebalance_age = 0
+
+    if not rebalance_due or exposure <= 0.0:
+        execution_codes = (
+            set(_managed_positions(snapshot).keys())
+            | {item["code"] for item in A.target_candidates}
+        )
+        A.execution_prices = _raw_execution_prices(
+            context, execution_codes, "open"
+        )
 
     exit_sent = _risk_exits(
         context, snapshot, asof, trade_date, style_exposures
@@ -1586,6 +1647,7 @@ def init(context):
     A.owned_codes = set()
     A.sent_order_keys = set()
     A.retry_rebalance = False
+    A.execution_prices = {}
     A.sector_source_logged = set()
     A.first_bar_logged = False
     A.last_portfolio_log_date = ""
