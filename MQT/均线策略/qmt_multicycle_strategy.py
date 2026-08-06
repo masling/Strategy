@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.5.0_20260805_EXECUTABLE_ALLOCATION
+# DOWNLOAD_BUILD: V1.5.1_20260805_QMT_VISIBLE_BACKTEST_ORDERS
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_0"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_1"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -1060,18 +1060,19 @@ def _send_order(context, side, code, volume, trade_date, reason):
     key = (str(trade_date), str(code), str(side))
     if key in A.sent_order_keys:
         return False
-    if side == "buy":
-        operation = A.buy_code
-    else:
-        operation = A.sell_code
-    price_type = 5 if A.mode == "BACKTEST" else 14
-    quick_trade = 0 if A.mode == "BACKTEST" else 1
     remark = str(trade_date) + "_" + side + "_" + str(reason)
     try:
-        passorder(
-            operation, 1101, A.acct, code, price_type, -1, volume,
-            STRATEGY_NAME, quick_trade, remark, context
-        )
+        if A.mode == "BACKTEST":
+            signed_volume = volume if side == "buy" else -volume
+            order_shares(
+                code, signed_volume, "lastest", -1, context, A.acct
+            )
+        else:
+            operation = A.buy_code if side == "buy" else A.sell_code
+            passorder(
+                operation, 1101, A.acct, code, 14, -1, volume,
+                STRATEGY_NAME, 1, remark, context
+            )
     except Exception as error:
         print("ERROR order failed:", side, code, volume, error)
         return False
@@ -1531,7 +1532,10 @@ def init(context):
     A.backtest_end = _context_datetime(
         getattr(context, "end", ""), end_of_day=True
     )
-    A.acct = "test" if A.mode == "BACKTEST" else str(globals().get("account", ""))
+    A.acct = "testS" if A.mode == "BACKTEST" else str(
+        globals().get("account", "")
+    )
+    context.accountID = A.acct
     A.acct_type = "STOCK" if A.mode == "BACKTEST" else str(
         globals().get("accountType", "STOCK")
     ).upper()
