@@ -425,6 +425,89 @@ class IntradayAggregationTests(unittest.TestCase):
 
 
 class QmtAdapterTests(unittest.TestCase):
+    def test_backtest_init_uses_qmt_compatible_test_account(self):
+        class FakeContext(object):
+            period = "5m"
+            start = "2026-01-01 00:00:00"
+            end = "2026-08-04 23:59:59"
+            capital = 1000000.0
+
+        context = FakeContext()
+        invoke("init", context)
+        self.assertEqual(strategy.A.acct, "testS")
+        self.assertEqual(context.accountID, "testS")
+
+    def test_backtest_order_uses_order_shares_for_visible_trade_records(self):
+        class FakeContext(object):
+            pass
+
+        original_order_shares = getattr(strategy, "order_shares", None)
+        had_order_shares = hasattr(strategy, "order_shares")
+        original_passorder = getattr(strategy, "passorder", None)
+        had_passorder = hasattr(strategy, "passorder")
+        calls = []
+        strategy.A.mode = "BACKTEST"
+        strategy.A.acct = "testS"
+        strategy.A.sent_order_keys = set()
+        strategy.A.owned_codes = set()
+        strategy.order_shares = lambda *args: calls.append(args)
+        strategy.passorder = lambda *args: (_ for _ in ()).throw(
+            AssertionError("backtest must not use passorder")
+        )
+        context = FakeContext()
+        try:
+            self.assertTrue(invoke(
+                "_send_order", context, "buy", "000001.SZ", 1000,
+                "20260805", "rebalance",
+            ))
+            self.assertTrue(invoke(
+                "_send_order", context, "sell", "600000.SH", 500,
+                "20260805", "risk_stop",
+            ))
+            self.assertEqual(calls, [
+                ("000001.SZ", 1000, "lastest", -1, context, "testS"),
+                ("600000.SH", -500, "lastest", -1, context, "testS"),
+            ])
+        finally:
+            if had_order_shares:
+                strategy.order_shares = original_order_shares
+            else:
+                delattr(strategy, "order_shares")
+            if had_passorder:
+                strategy.passorder = original_passorder
+            else:
+                delattr(strategy, "passorder")
+
+    def test_simulation_order_keeps_passorder_execution_path(self):
+        class FakeContext(object):
+            pass
+
+        original_passorder = getattr(strategy, "passorder", None)
+        had_passorder = hasattr(strategy, "passorder")
+        calls = []
+        strategy.A.mode = "SIMULATION"
+        strategy.A.acct = "SIM001"
+        strategy.A.buy_code = 23
+        strategy.A.sell_code = 24
+        strategy.A.sent_order_keys = set()
+        strategy.A.owned_codes = set()
+        strategy.passorder = lambda *args: calls.append(args)
+        context = FakeContext()
+        try:
+            self.assertTrue(invoke(
+                "_send_order", context, "buy", "000001.SZ", 1000,
+                "20260805", "rebalance",
+            ))
+            self.assertEqual(calls[0], (
+                23, 1101, "SIM001", "000001.SZ", 14, -1, 1000,
+                strategy.STRATEGY_NAME, 1, "20260805_buy_rebalance", context,
+            ))
+        finally:
+            if had_passorder:
+                strategy.passorder = original_passorder
+            else:
+                delattr(strategy, "passorder")
+
     def test_backtest_init_rejects_non_5m_main_period(self):
         class FakeContext(object):
             period = "1d"
