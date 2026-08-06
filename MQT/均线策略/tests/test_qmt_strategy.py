@@ -269,6 +269,26 @@ class StockSelectionTests(unittest.TestCase):
             invoke("entry_structure_score", high),
         )
 
+    def test_tinci_april_10_ma40_reversal_is_starter_setup(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 46.421, "low": 43.551, "previous_high": 45.101,
+            "ma7": 44.46, "ma13": 44.69, "ma40": 43.54,
+            "ma13_prev": 44.1, "ma40_prev": 43.2,
+            "ma7_slope3": -0.0148, "ma13_slope3": 0.0142,
+            "distance_ma40": 46.421 / 43.54 - 1.0,
+            "ma7_ma13_gap": 44.46 / 44.69 - 1.0,
+            "ma13_ma40_gap": 44.69 / 43.54 - 1.0,
+        })
+        self.assertEqual(setup, "ma40_starter")
+
+    def test_tinci_april_24_ma13_reversal_activates_trend_add(self):
+        metrics = {
+            "close": 52.741, "low": 48.301, "previous_high": 52.081,
+            "ma7": 50.41, "ma13": 48.52, "ma40": 45.52,
+            "ma7_slope3": 0.0306, "ma13_slope3": 0.0371,
+        }
+        self.assertTrue(invoke("trend_add_ready", metrics, 10))
+
     def test_position_metrics_remain_available_after_trend_break(self):
         frame = self.make_frame(last_close=130.0)
         frame.loc[frame.index[-1], "close"] = 100.0
@@ -359,6 +379,7 @@ class RiskAndSizingTests(unittest.TestCase):
     def test_style_budget_is_divided_only_inside_that_style(self):
         strategy.A.blocked_codes = set()
         strategy.A.intraday_scales = {}
+        strategy.A.entry_scales = {}
         snapshot = {"balance": 1000000.0}
         candidates = [
             {"code": "A", "style": "S1", "feature": {"close": 10.0}},
@@ -374,6 +395,7 @@ class RiskAndSizingTests(unittest.TestCase):
     def test_sizing_skips_zero_lot_candidate_and_uses_next_ranked_names(self):
         strategy.A.blocked_codes = set()
         strategy.A.intraday_scales = {}
+        strategy.A.entry_scales = {}
         snapshot = {"balance": 1000000.0}
         candidates = [
             {"code": "EXPENSIVE", "style": "S1", "score": 100.0,
@@ -402,6 +424,17 @@ class RiskAndSizingTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["planned_exposure"], 0.25)
         self.assertAlmostEqual(metrics["target_exposure"], 0.249)
         self.assertAlmostEqual(metrics["fill_rate"], 0.996)
+
+    def test_ma40_starter_uses_half_sized_initial_position(self):
+        strategy.A.blocked_codes = set()
+        strategy.A.intraday_scales = {}
+        strategy.A.entry_scales = {"A": 0.5}
+        desired = invoke(
+            "_desired_share_map", {"balance": 1000000.0}, {"S1": 0.25},
+            [{"code": "A", "style": "S1", "feature": {"close": 10.0}}],
+            {}, {"A": 10.0},
+        )
+        self.assertEqual(desired, {"A": 7500})
 
 
 class IntradayAggregationTests(unittest.TestCase):
@@ -502,10 +535,11 @@ class IntradayAggregationTests(unittest.TestCase):
                 "age": 0,
             },
         }
-        invoke("_advance_addback_plans", "20260804")
-        invoke("_advance_addback_plans", "20260804")
-        invoke("_advance_addback_plans", "20260805")
-        invoke("_advance_addback_plans", "20260806")
+        strategy.A.build_plans = {}
+        invoke("_advance_position_plans", "20260804")
+        invoke("_advance_position_plans", "20260804")
+        invoke("_advance_position_plans", "20260805")
+        invoke("_advance_position_plans", "20260806")
         self.assertEqual(
             strategy.A.addback_plans["000001.SZ"]["age"], 3
         )

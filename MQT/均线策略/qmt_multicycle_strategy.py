@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.6.0_20260806_TREND_ENTRY_STAGED_ADDBACK
+# DOWNLOAD_BUILD: V1.6.1_20260806_MA40_STARTER_TREND_ADD
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_6_0"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_6_1"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -35,6 +35,12 @@ ADDBACK_MIN_MA7_SLOPE_3D = 0.001
 ADDBACK_MIN_MA13_SLOPE_3D = 0.0005
 ADDBACK_MIN_DISTANCE_MA7 = 0.05
 ADDBACK_MIN_DISTANCE_MA13 = 0.08
+STARTER_POSITION_SCALE = 0.5
+STARTER_MAX_MA7_MA13_GAP = 0.02
+STARTER_MAX_DISTANCE_MA40 = 0.15
+STARTER_SUPPORT_TOLERANCE = 0.02
+TREND_ADD_WINDOW_DAYS = 15
+TREND_ADD_SUPPORT_TOLERANCE = 0.02
 ALLOW_CHINEXT = True
 ALLOW_STAR = False
 ALLOW_BSE = False
@@ -348,6 +354,46 @@ def _atr(frame, count=14):
     return float(np.mean(true_range[-count:]))
 
 
+def entry_setup_kind(metrics):
+    close = float(metrics["close"])
+    low = float(metrics["low"])
+    previous_high = float(metrics["previous_high"])
+    ma7 = float(metrics["ma7"])
+    ma13 = float(metrics["ma13"])
+    ma40 = float(metrics["ma40"])
+    ma13_prev = float(metrics["ma13_prev"])
+    ma40_prev = float(metrics["ma40_prev"])
+    slope7 = float(metrics["ma7_slope3"])
+    slope13 = float(metrics["ma13_slope3"])
+    distance40 = float(metrics["distance_ma40"])
+    gap7 = float(metrics["ma7_ma13_gap"])
+    gap13 = float(metrics["ma13_ma40_gap"])
+    trend_entry = bool(
+        close > ma7 > ma13 > ma40
+        and ma13 > ma13_prev and ma40 > ma40_prev
+        and slope7 >= ENTRY_MIN_MA7_SLOPE_3D
+        and slope13 >= ENTRY_MIN_MA13_SLOPE_3D
+        and distance40 <= ENTRY_MAX_DISTANCE_MA40
+        and gap7 <= max(
+            ENTRY_MAX_MA7_MA13_GAP,
+            ENTRY_MAX_GAP_RATIO * gap13
+        )
+    )
+    if trend_entry:
+        return "trend"
+    ma40_starter = bool(
+        close > ma13 > ma40
+        and ma13 > ma13_prev and ma40 > ma40_prev
+        and slope13 >= ENTRY_MIN_MA13_SLOPE_3D
+        and ma7 >= ma13 * (1.0 - STARTER_MAX_MA7_MA13_GAP)
+        and slope7 >= -0.02
+        and abs(low / ma40 - 1.0) <= STARTER_SUPPORT_TOLERANCE
+        and close > previous_high
+        and distance40 <= STARTER_MAX_DISTANCE_MA40
+    )
+    return "ma40_starter" if ma40_starter else None
+
+
 def stock_feature(frame, sector_return13, sector_return40,
                   min_average_amount=50000000.0):
     required = ["close", "high", "low", "amount", "volume"]
@@ -385,23 +431,23 @@ def stock_feature(frame, sector_return13, sector_return40,
     ma13_ma40_gap = ma13 / ma40 - 1.0
     ma7_slope3 = ma7 / ma7_prev3 - 1.0
     ma13_slope3 = ma13 / ma13_prev3 - 1.0
+    latest_low = float(data["low"].iloc[-1])
+    previous_high = float(data["high"].iloc[-2])
     high40 = float(np.max(np.asarray(data["high"], dtype=float)[-40:]))
     high_proximity = close[-1] / high40 if high40 > 0 else 0.0
     atr = _atr(data, 14)
 
-    if not (close[-1] > ma7 > ma13 > ma40):
-        return None
-    if not (ma13 > ma13_prev and ma40 > ma40_prev):
-        return None
-    if ma7_slope3 < ENTRY_MIN_MA7_SLOPE_3D:
-        return None
-    if ma13_slope3 < ENTRY_MIN_MA13_SLOPE_3D:
-        return None
-    if distance_ma40 > ENTRY_MAX_DISTANCE_MA40:
-        return None
-    if ma7_ma13_gap > max(
-            ENTRY_MAX_MA7_MA13_GAP,
-            ENTRY_MAX_GAP_RATIO * ma13_ma40_gap):
+    entry_setup = entry_setup_kind({
+        "close": close[-1], "low": latest_low,
+        "previous_high": previous_high,
+        "ma7": ma7, "ma13": ma13, "ma40": ma40,
+        "ma13_prev": ma13_prev, "ma40_prev": ma40_prev,
+        "ma7_slope3": ma7_slope3, "ma13_slope3": ma13_slope3,
+        "distance_ma40": distance_ma40,
+        "ma7_ma13_gap": ma7_ma13_gap,
+        "ma13_ma40_gap": ma13_ma40_gap,
+    })
+    if entry_setup is None:
         return None
     if average_amount < float(min_average_amount):
         return None
@@ -433,6 +479,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "ma13_ma40_gap": ma13_ma40_gap,
         "ma7_slope3": ma7_slope3,
         "ma13_slope3": ma13_slope3,
+        "entry_setup": entry_setup,
         "high_proximity": high_proximity,
         "average_amount": average_amount,
         "volatility": volatility,
@@ -456,14 +503,18 @@ def position_metrics(frame):
     ma40 = float(np.mean(close[-40:]))
     ma7_prev3 = float(np.mean(close[-10:-3]))
     ma13_prev3 = float(np.mean(close[-16:-3]))
+    ma40_prev5 = float(np.mean(close[-45:-5]))
     return {
         "close": float(close[-1]),
         "high": float(data["high"].iloc[-1]),
+        "low": float(data["low"].iloc[-1]),
+        "previous_high": float(data["high"].iloc[-2]),
         "ma7": ma7,
         "ma13": ma13,
         "ma40": ma40,
         "ma7_slope3": ma7 / ma7_prev3 - 1.0,
         "ma13_slope3": ma13 / ma13_prev3 - 1.0,
+        "ma40_slope5": ma40 / ma40_prev5 - 1.0,
         "atr": _atr(data, 14),
     }
 
@@ -673,6 +724,28 @@ def addback_trend_ready(metrics, peak_price=None):
     return (
         price / ma7 - 1.0 >= ADDBACK_MIN_DISTANCE_MA7
         and price / ma13 - 1.0 >= ADDBACK_MIN_DISTANCE_MA13
+    )
+
+
+def trend_add_ready(metrics, age):
+    if not metrics or int(age) > TREND_ADD_WINDOW_DAYS:
+        return False
+    ma7 = float(metrics.get("ma7", 0.0))
+    ma13 = float(metrics.get("ma13", 0.0))
+    ma40 = float(metrics.get("ma40", 0.0))
+    if not (ma7 > ma13 > ma40 > 0.0):
+        return False
+    if float(metrics.get("ma7_slope3", 0.0)) < ENTRY_MIN_MA7_SLOPE_3D:
+        return False
+    if float(metrics.get("ma13_slope3", 0.0)) < ENTRY_MIN_MA13_SLOPE_3D:
+        return False
+    low = float(metrics.get("low", 0.0))
+    close = float(metrics.get("close", 0.0))
+    previous_high = float(metrics.get("previous_high", 0.0))
+    return (
+        low > 0.0
+        and abs(low / ma13 - 1.0) <= TREND_ADD_SUPPORT_TOLERANCE
+        and close > previous_high > 0.0
     )
 
 
@@ -1356,7 +1429,10 @@ def _desired_share_map(snapshot, style_exposures, candidates, tick_map,
             snapshot["balance"], style_exposure, style_count,
             price, MAX_STOCK_WEIGHT
         )
-        scale = float(getattr(A, "intraday_scales", {}).get(code, 1.0))
+        scale = (
+            float(getattr(A, "intraday_scales", {}).get(code, 1.0))
+            * float(getattr(A, "entry_scales", {}).get(code, 1.0))
+        )
         sized = int(shares * scale / 100.0) * 100
         if sized > 0:
             desired[code] = sized
@@ -1434,12 +1510,24 @@ def _rebalance_to_desired(context, snapshot, trade_date):
         if order_volume <= 0:
             retry = True
             continue
+        order_reason = (
+            "trend_add_ma13"
+            if code in A.trend_add_codes else "rebalance"
+        )
         if _send_order(
                 context, "buy", code, order_volume, trade_date,
-                "rebalance", price):
+                order_reason, price):
             sent_any = True
             retry = True
             cash -= order_volume * price
+            A.trend_add_codes.discard(code)
+            if (current <= 0
+                    and float(A.entry_scales.get(code, 1.0)) < 0.999):
+                A.build_plans[code] = {
+                    "start_date": str(trade_date),
+                    "last_age_date": str(trade_date),
+                    "age": 0,
+                }
             if code not in A.position_meta:
                 A.position_meta[code] = {
                     "entry_price": price,
@@ -1464,6 +1552,8 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         A.position_meta = {}
         A.daily_position_metrics = {}
         A.addback_plans = {}
+        A.build_plans = {}
+        A.trend_add_codes = set()
         return False
     if not style_exposures:
         sent = False
@@ -1475,6 +1565,9 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
                     A.execution_prices.get(code)):
                 sent = True
         A.addback_plans = {}
+        A.build_plans = {}
+        A.entry_scales = {}
+        A.trend_add_codes = set()
         return sent
 
     history = fetch_history(
@@ -1548,6 +1641,9 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         A.blocked_codes.add(code)
         A.intraday_scales.pop(code, None)
         A.addback_plans.pop(code, None)
+        A.build_plans.pop(code, None)
+        A.entry_scales.pop(code, None)
+        A.trend_add_codes.discard(code)
         if _send_order(
                 context, "sell", code, position["available"],
                 trade_date, reason, A.execution_prices.get(code)):
@@ -1558,13 +1654,35 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
     return sent
 
 
-def _advance_addback_plans(trade_date):
-    for plan in A.addback_plans.values():
-        if str(plan.get("last_age_date", "")) == str(trade_date):
+def _advance_position_plans(trade_date):
+    for plans in (A.addback_plans, A.build_plans):
+        for plan in plans.values():
+            if str(plan.get("last_age_date", "")) == str(trade_date):
+                continue
+            if str(plan.get("start_date", "")) != str(trade_date):
+                plan["age"] = int(plan.get("age", 0)) + 1
+            plan["last_age_date"] = str(trade_date)
+
+
+def _activate_trend_adds(snapshot):
+    positions = _managed_positions(snapshot)
+    activated = False
+    for code in list(A.build_plans.keys()):
+        plan = A.build_plans[code]
+        if code not in positions:
+            A.build_plans.pop(code, None)
             continue
-        if str(plan.get("start_date", "")) != str(trade_date):
-            plan["age"] = int(plan.get("age", 0)) + 1
-        plan["last_age_date"] = str(trade_date)
+        age = int(plan.get("age", 0))
+        if age > TREND_ADD_WINDOW_DAYS:
+            A.build_plans.pop(code, None)
+            continue
+        if not trend_add_ready(A.daily_position_metrics.get(code), age):
+            continue
+        A.entry_scales[code] = 1.0
+        A.build_plans.pop(code, None)
+        A.trend_add_codes.add(code)
+        activated = True
+    return activated
 
 
 def _print_daily_summary(trade_date, market, sectors, candidates):
@@ -1718,7 +1836,7 @@ def run_daily_cycle(context, asof, trade_date):
     if snapshot is None:
         return
     _refresh_owned_codes(snapshot)
-    _advance_addback_plans(trade_date)
+    _advance_position_plans(trade_date)
 
     style_changed = style_exposures != A.last_style_exposures
     rebalance_due = A.rebalance_age >= REBALANCE_EVERY or style_changed
@@ -1754,6 +1872,20 @@ def run_daily_cycle(context, asof, trade_date):
                 targets.append(item)
         A.target_candidates = targets
         A.blocked_codes = set()
+        held_codes = set(_managed_positions(snapshot).keys())
+        A.entry_scales = {
+            code: scale for code, scale in A.entry_scales.items()
+            if code in used_codes or code in held_codes
+        }
+        for item in A.target_candidates:
+            code = item["code"]
+            if code in held_codes or code in A.entry_scales:
+                continue
+            A.entry_scales[code] = (
+                STARTER_POSITION_SCALE
+                if item.get("feature", {}).get("entry_setup")
+                == "ma40_starter" else 1.0
+            )
         A.intraday_scales = {
             code: scale for code, scale in A.intraday_scales.items()
             if code in used_codes
@@ -1798,9 +1930,19 @@ def run_daily_cycle(context, asof, trade_date):
     exit_sent = _risk_exits(
         context, snapshot, asof, trade_date, style_exposures
     )
+    trend_add_due = _activate_trend_adds(snapshot)
+    if trend_add_due:
+        tick_map = _simulation_tick(
+            context, [item["code"] for item in A.target_candidates]
+        )
+        A.desired_shares = _desired_share_map(
+            snapshot, style_exposures, A.target_candidates, tick_map,
+            A.execution_prices,
+        )
+        print("DESIRED", trade_date, A.desired_shares)
     should_rebalance = (
         rebalance_due or exposure <= 0.0
-        or A.retry_rebalance or exit_sent
+        or A.retry_rebalance or exit_sent or trend_add_due
     )
     if should_rebalance:
         A.retry_rebalance = _rebalance_to_desired(
@@ -1855,6 +1997,9 @@ def init(context):
     A.intraday_scales = {}
     A.addback_plans = {}
     A.daily_position_metrics = {}
+    A.entry_scales = {}
+    A.build_plans = {}
+    A.trend_add_codes = set()
     A.blocked_codes = set()
     A.owned_codes = set()
     A.sent_order_keys = set()
