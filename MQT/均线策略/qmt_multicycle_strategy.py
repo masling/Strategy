@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.5.2_20260806_BACKTEST_STATS_RANGE
+# DOWNLOAD_BUILD: V1.5.3_20260806_QMT_FIXED_PRICE_ORDERS
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_2"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_3"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -848,6 +848,7 @@ def _virtual_backtest_snapshot():
             "volume": volume,
             "available": max(0, min(volume, available)),
             "open_price": float(getattr(position, "m_dOpenPrice", 0.0)),
+            "current_price": float(getattr(position, "m_dLastPrice", 0.0)),
         }
     snapshot = {
         "balance": float(account_data.m_dBalance),
@@ -971,6 +972,7 @@ def _backtest_snapshot(context):
             "volume": volume,
             "available": max(0, volume - same_day_buys.get(code, 0)),
             "open_price": open_price,
+            "current_price": current_price,
         }
     available_cash = max(0.0, balance - market_value)
     if _portfolio_log_due(context):
@@ -1068,7 +1070,7 @@ def _pending_order_codes():
     return pending
 
 
-def _send_order(context, side, code, volume, trade_date, reason):
+def _send_order(context, side, code, volume, trade_date, reason, price=None):
     volume = int(volume)
     if volume <= 0:
         return False
@@ -1079,7 +1081,12 @@ def _send_order(context, side, code, volume, trade_date, reason):
     try:
         if A.mode == "BACKTEST":
             signed_volume = volume if side == "buy" else -volume
-            fixed_price = _backtest_order_price(context, code)
+            try:
+                fixed_price = float(price)
+            except (TypeError, ValueError):
+                fixed_price = float("nan")
+            if not np.isfinite(fixed_price) or fixed_price <= 0.0:
+                fixed_price = _backtest_order_price(context, code)
             if fixed_price is None:
                 print("ERROR backtest order skipped, invalid price:", code)
                 return False
@@ -1235,7 +1242,11 @@ def _rebalance_to_desired(context, snapshot, trade_date):
             continue
         raw_volume = min(available, current - desired)
         volume = raw_volume if desired == 0 else int(raw_volume / 100) * 100
-        if _send_order(context, "sell", code, volume, trade_date, "rebalance"):
+        price = float(positions.get(code, {}).get("current_price", 0.0))
+        if price <= 0.0:
+            price = float(positions.get(code, {}).get("open_price", 0.0))
+        if _send_order(context, "sell", code, volume, trade_date,
+                       "rebalance", price):
             sent_any = True
             retry = True
             sold_codes.add(code)
@@ -1260,7 +1271,8 @@ def _rebalance_to_desired(context, snapshot, trade_date):
             retry = True
             continue
         if _send_order(
-                context, "buy", code, order_volume, trade_date, "rebalance"):
+                context, "buy", code, order_volume, trade_date,
+                "rebalance", price):
             sent_any = True
             retry = True
             cash -= order_volume * price
@@ -1293,7 +1305,8 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
             A.desired_shares[code] = 0
             if _send_order(
                     context, "sell", code, position["available"],
-                    trade_date, "style_risk"):
+                    trade_date, "style_risk",
+                    position.get("current_price") or position["open_price"]):
                 sent = True
         return sent
 
@@ -1345,7 +1358,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         A.intraday_scales.pop(code, None)
         if _send_order(
                 context, "sell", code, position["available"],
-                trade_date, reason):
+                trade_date, reason, metrics["close"]):
             sent = True
     for code in list(A.position_meta.keys()):
         if code not in active_codes and code not in A.desired_shares:
@@ -1412,7 +1425,7 @@ def run_intraday_cycle(context, end_time, trade_date):
                 continue
             if _send_order(
                     context, "sell", code, volume, trade_date,
-                    "intraday_top"):
+                    "intraday_top", float(bars30["close"].iloc[-1])):
                 remaining_ratio = max(0.0, float(current - volume) / current)
                 A.intraday_scales[code] = remaining_ratio
                 A.desired_shares[code] = current - volume
@@ -1437,7 +1450,7 @@ def run_intraday_cycle(context, end_time, trade_date):
                 continue
             if _send_order(
                     context, "buy", code, volume, trade_date,
-                    "intraday_addback"):
+                    "intraday_addback", price):
                 A.desired_shares[code] = base_desired
                 print("INTRADAY", trade_date, code, "add", volume)
             else:

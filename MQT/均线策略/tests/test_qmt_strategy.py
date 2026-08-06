@@ -485,6 +485,36 @@ class QmtAdapterTests(unittest.TestCase):
             else:
                 delattr(strategy, "passorder")
 
+    def test_backtest_order_accepts_precomputed_price_outside_universe(self):
+        class FakeContext(object):
+            accountID = "testS"
+
+            @staticmethod
+            def get_history_data(*args):
+                raise AssertionError("explicit price must avoid universe lookup")
+
+        original = getattr(strategy, "order_shares", None)
+        had_original = hasattr(strategy, "order_shares")
+        calls = []
+        strategy.A.mode = "BACKTEST"
+        strategy.A.sent_order_keys = set()
+        strategy.A.owned_codes = set()
+        strategy.order_shares = lambda *args: calls.append(args)
+        context = FakeContext()
+        try:
+            self.assertTrue(invoke(
+                "_send_order", context, "buy", "002755.SZ", 1000,
+                "20260806", "rebalance", 13.25,
+            ))
+            self.assertEqual(calls, [
+                ("002755.SZ", 1000, "fix", 13.25, context, "testS"),
+            ])
+        finally:
+            if had_original:
+                strategy.order_shares = original
+            else:
+                delattr(strategy, "order_shares")
+
     def test_simulation_order_keeps_passorder_execution_path(self):
         class FakeContext(object):
             pass
@@ -648,6 +678,7 @@ class QmtAdapterTests(unittest.TestCase):
                     "volume": 1000,
                     "available": 0,
                     "open_price": 9.50,
+                    "current_price": 10.00,
                 }},
             )
         finally:
@@ -757,6 +788,7 @@ class QmtAdapterTests(unittest.TestCase):
                     "volume": 1000,
                     "available": 0,
                     "open_price": 9.50,
+                    "current_price": 10.00,
                 }},
             )
         finally:
