@@ -76,20 +76,22 @@ export function drawCandles(canvas, rows, orders = [], sourceRows = rows) {
     const top = y(Math.max(r.open, r.close)), bottom = y(Math.min(r.open, r.close));
     ctx.fillRect(x - Math.max(1, step * .28), top, Math.max(2, step * .56), Math.max(1, bottom - top));
     const trades = tradesByIndex.get(i) || [];
-    const buy = trades.find(order => order.side === 'buy');
-    const sell = trades.find(order => order.side === 'sell');
+    const buys = trades.filter(order => order.side === 'buy');
+    const sells = trades.filter(order => order.side === 'sell');
+    const buy = buys[0];
+    const sell = sells[0];
     ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center';
     if (buy) {
       const markerY = Math.min(height - pad.b - 4, y(r.low) + 13);
       ctx.fillStyle = '#ffcf5c'; ctx.beginPath();
       ctx.moveTo(x, markerY); ctx.lineTo(x - 5, markerY + 8); ctx.lineTo(x + 5, markerY + 8); ctx.fill();
-      ctx.fillText(`B${clockLabel(buy) ? ` ${clockLabel(buy)}` : ''}`, x, markerY + 19);
+      ctx.fillText(`B${buys.length > 1 ? `×${buys.length}` : ''}${clockLabel(buy) ? ` ${clockLabel(buy)}` : ''}`, x, markerY + 19);
     }
     if (sell) {
       const markerY = Math.max(pad.t + 4, y(r.high) - 13);
       ctx.fillStyle = '#65d6bc'; ctx.beginPath();
       ctx.moveTo(x, markerY); ctx.lineTo(x - 5, markerY - 8); ctx.lineTo(x + 5, markerY - 8); ctx.fill();
-      ctx.fillText(`S${clockLabel(sell) ? ` ${clockLabel(sell)}` : ''}`, x, markerY - 11);
+      ctx.fillText(`S${sells.length > 1 ? `×${sells.length}` : ''}${clockLabel(sell) ? ` ${clockLabel(sell)}` : ''}`, x, markerY - 11);
     }
   });
   const drawAverage = (period, color) => {

@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.6.2_20260806_BASE_RECLAIM_MA7_ADD
+# DOWNLOAD_BUILD: V1.6.3_20260806_ORDER_DEAL_STATUS
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_6_2"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_6_3"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -1094,6 +1094,77 @@ def _record_trade_day(value):
     return ""
 
 
+def _record_value(record, names, default=None):
+    for name in names:
+        if hasattr(record, name):
+            value = getattr(record, name)
+            if value is not None:
+                return value
+    return default
+
+
+def _record_trade_clock(record):
+    value = _record_value(
+        record,
+        ("trade_time", "deal_time", "m_strTradeTime", "trade_date"),
+        "",
+    )
+    digits = "".join(character for character in str(value or "")
+                     if character.isdigit())
+    if len(digits) >= 14:
+        return digits[8:14]
+    if 6 <= len(digits) < 8:
+        return digits[-6:]
+    return "000000"
+
+
+def _log_backtest_deals(context):
+    try:
+        records = get_result_records(
+            "dealdetails", context.barpos, context
+        ) or []
+    except Exception:
+        return
+    occurrences = {}
+    logged_keys = getattr(A, "logged_deal_keys", set())
+    for record in records:
+        trade_day = _record_trade_day(_record_value(
+            record, ("trade_date", "m_strTradeDate", "trade_time"), ""
+        ))
+        if not trade_day:
+            continue
+        try:
+            code = _record_code(record)
+            side = (
+                "buy"
+                if int(_record_value(record, ("open_close",), -1)) == 1
+                else "sell"
+            )
+            volume = int(_record_value(
+                record, ("position", "volume", "trade_volume"), 0
+            ))
+            price = round(float(_record_value(
+                record, ("trade_price", "price"), 0.0
+            )), 4)
+        except Exception:
+            continue
+        if volume <= 0 or price <= 0.0:
+            continue
+        clock = _record_trade_clock(record)
+        base_key = (trade_day, clock, side, code, volume, price)
+        occurrence = occurrences.get(base_key, 0)
+        occurrences[base_key] = occurrence + 1
+        key = base_key + (occurrence,)
+        if key in logged_keys:
+            continue
+        logged_keys.add(key)
+        print(
+            "DEAL", trade_day, clock, side, code, volume,
+            "price", price,
+        )
+    A.logged_deal_keys = logged_keys
+
+
 def _backtest_trade_day(context):
     try:
         value = context.get_bar_timetag(context.barpos)
@@ -1124,6 +1195,7 @@ def _portfolio_log_due(context):
 
 
 def _backtest_snapshot(context):
+    _log_backtest_deals(context)
     virtual_snapshot = _virtual_backtest_snapshot()
     if virtual_snapshot is not None:
         if _portfolio_log_due(context):
@@ -1280,11 +1352,27 @@ def _pending_order_codes():
     return pending
 
 
+def _order_time(context):
+    try:
+        timetag = context.get_bar_timetag(context.barpos)
+        order_text = timetag_to_datetime(timetag, "%Y%m%d%H%M%S")
+        order_digits = "".join(
+            character for character in str(order_text)
+            if character.isdigit()
+        )
+        if len(order_digits) >= 14:
+            return order_digits[8:14]
+    except Exception:
+        pass
+    return datetime.datetime.now().strftime("%H%M%S")
+
+
 def _send_order(context, side, code, volume, trade_date, reason, price=None):
     volume = int(volume)
     if volume <= 0:
         return False
-    key = (str(trade_date), str(code), str(side), str(reason))
+    order_time = _order_time(context)
+    key = (str(trade_date), order_time, str(code), str(side))
     if key in A.sent_order_keys:
         return False
     remark = str(trade_date) + "_" + side + "_" + str(reason)
@@ -1317,21 +1405,11 @@ def _send_order(context, side, code, volume, trade_date, reason, price=None):
     if side == "buy":
         A.owned_codes.add(code)
     try:
-        timetag = context.get_bar_timetag(context.barpos)
-        order_text = timetag_to_datetime(timetag, "%Y%m%d%H%M%S")
-        order_digits = "".join(
-            character for character in str(order_text)
-            if character.isdigit()
-        )
-        order_time = order_digits[8:14] if len(order_digits) >= 14 else "000000"
-    except Exception:
-        order_time = datetime.datetime.now().strftime("%H%M%S")
-    try:
         logged_price = round(float(logged_price), 4)
     except (TypeError, ValueError):
         logged_price = -1
     print(
-        "ORDER", trade_date, order_time, side, code, volume,
+        "ORDER_SUBMITTED", trade_date, order_time, side, code, volume,
         "price", logged_price, reason,
     )
     return True
@@ -2041,6 +2119,7 @@ def init(context):
     A.blocked_codes = set()
     A.owned_codes = set()
     A.sent_order_keys = set()
+    A.logged_deal_keys = set()
     A.retry_rebalance = False
     A.execution_prices = {}
     A.sector_source_logged = set()

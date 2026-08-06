@@ -41,6 +41,6 @@ export async function fetchDaily(code, endDate = '', startDate = '') {
 }
 
 export async function fetchThirtyMinute(code, endDate = '') {
-  const payload = await tencent('kline/mkline', `${tencentCode(code)},m30,,240`, 'https://ifzq.gtimg.cn');
+  const payload = await tencent('kline/mkline', `${tencentCode(code)},m30,,640`, 'https://ifzq.gtimg.cn');
   return rows(payload, code, 'm30');
 }

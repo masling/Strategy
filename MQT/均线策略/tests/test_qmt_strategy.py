@@ -748,10 +748,50 @@ class QmtAdapterTests(unittest.TestCase):
                 ("002755.SZ", 1000, "fix", 13.25, context, "testS"),
             ])
             self.assertIn(
-                "ORDER 20260806 100500 buy 002755.SZ 1000 "
+                "ORDER_SUBMITTED 20260806 100500 buy 002755.SZ 1000 "
                 "price 13.25 rebalance",
                 output.getvalue(),
             )
+        finally:
+            if had_original:
+                strategy.order_shares = original
+            else:
+                delattr(strategy, "order_shares")
+            if had_original_timetag:
+                strategy.timetag_to_datetime = original_timetag
+            else:
+                delattr(strategy, "timetag_to_datetime")
+
+    def test_same_bar_same_side_order_is_not_submitted_twice(self):
+        class FakeContext(object):
+            accountID = "testS"
+            barpos = 12
+
+            @staticmethod
+            def get_bar_timetag(index):
+                return 20260806100500
+
+        original = getattr(strategy, "order_shares", None)
+        had_original = hasattr(strategy, "order_shares")
+        original_timetag = getattr(strategy, "timetag_to_datetime", None)
+        had_original_timetag = hasattr(strategy, "timetag_to_datetime")
+        calls = []
+        strategy.A.mode = "BACKTEST"
+        strategy.A.sent_order_keys = set()
+        strategy.A.owned_codes = set()
+        strategy.order_shares = lambda *args: calls.append(args)
+        strategy.timetag_to_datetime = lambda *args: "20260806100500"
+        context = FakeContext()
+        try:
+            self.assertTrue(invoke(
+                "_send_order", context, "sell", "300620.SZ", 1000,
+                "20260806", "sector_rotation", 93.66,
+            ))
+            self.assertFalse(invoke(
+                "_send_order", context, "sell", "300620.SZ", 1000,
+                "20260806", "rebalance", 93.66,
+            ))
+            self.assertEqual(len(calls), 1)
         finally:
             if had_original:
                 strategy.order_shares = original
@@ -979,6 +1019,38 @@ class QmtAdapterTests(unittest.TestCase):
                 strategy.get_trade_detail_data = original_trade
             else:
                 delattr(strategy, "get_trade_detail_data")
+
+    def test_backtest_deal_records_are_logged_once_as_confirmed_deals(self):
+        class FakeDeal(object):
+            market = "SZ"
+            stockcode = "300620"
+            trade_date = "20260806100500"
+            open_close = 1
+            position = 1000
+            trade_price = 66.10
+
+        class FakeContext(object):
+            barpos = 20
+
+        original = getattr(strategy, "get_result_records", None)
+        had_original = hasattr(strategy, "get_result_records")
+        strategy.A.logged_deal_keys = set()
+        strategy.get_result_records = lambda *args: [FakeDeal()]
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                invoke("_log_backtest_deals", FakeContext())
+                invoke("_log_backtest_deals", FakeContext())
+            self.assertEqual(output.getvalue().count("DEAL "), 1)
+            self.assertIn(
+                "DEAL 20260806 100500 buy 300620.SZ 1000 price 66.1",
+                output.getvalue(),
+            )
+        finally:
+            if had_original:
+                strategy.get_result_records = original
+            else:
+                delattr(strategy, "get_result_records")
 
     def test_backtest_snapshot_fallback_excludes_same_day_buys_from_available(self):
         class FakeHolding(object):

@@ -111,7 +111,38 @@ ORDER 20250804 sell 002755.SZ 600 intraday_top`);
   assert.deepEqual(result.stocks[0].orders[0], {
     date: '20250801', time: '100500', side: 'buy', code: '002755.SZ',
     volume: 2000, price: 28.13, reason: 'rebalance',
+    status: 'submitted', failureReason: '',
   });
   assert.equal(result.stocks[0].orders[1].time, '');
   assert.equal(result.stocks[0].orders[1].price, null);
+});
+
+test('parses QMT timestamp-prefixed records and carries the latest desired shares', () => {
+  const result = parseQmtLog(`【2026-08-06 23:07:32.826】  DESIRED 20250801 {'300620.SZ': 1800}
+【2026-08-06 23:07:32.900】  ORDER_SUBMITTED 20250801 100500 buy 300620.SZ 1800 price 55.08 rebalance
+【2026-08-06 23:07:33.000】  STATE 20250801 exposure 0.8 style_exposures {} scores {}
+STATE 20250804 exposure 0.8 style_exposures {} scores {}`);
+  assert.equal(result.days[0].desired['300620.SZ'], 1800);
+  assert.equal(result.days[1].desired['300620.SZ'], 1800);
+  assert.equal(result.stocks[0].orders.length, 1);
+});
+
+test('marks orders explicitly rejected by QMT warnings as failed', () => {
+  const result = parseQmtLog(`【2026-08-06 23:09:17.283】  [系统]WARNING:当前股票300620.SZ没有持仓,不能卖出,跳过,日期时间:20250819 09:35:00
+ORDER 20250819 093500 sell 300620.SZ 1000 price 93.66 sector_rotation
+ORDER 20250819 093500 sell 300620.SZ 1000 price 93.66 rebalance`);
+  assert.equal(result.stocks[0].orders.length, 2);
+  assert.equal(result.stocks[0].failedCount, 2);
+  assert.equal(result.stocks[0].trades.length, 0);
+  assert.match(result.stocks[0].orders[0].failureReason, /无持仓/);
+});
+
+test('uses confirmed deals instead of submitted orders when deal records exist', () => {
+  const result = parseQmtLog(`ORDER_SUBMITTED 20250812 093500 buy 300620.SZ 1400 price 66.08 rebalance
+DEAL 20250812 093500 buy 300620.SZ 1000 price 66.10
+DEAL 20250812 093501 buy 300620.SZ 400 price 66.12`);
+  assert.equal(result.stocks[0].tradeSource, 'deal');
+  assert.equal(result.stocks[0].buyCount, 2);
+  assert.equal(result.stocks[0].buyVolume, 1400);
+  assert.equal(result.stocks[0].trades[0].status, 'filled');
 });

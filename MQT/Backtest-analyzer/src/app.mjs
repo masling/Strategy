@@ -1,4 +1,4 @@
-import { parseQmtLog } from './parser.mjs?v=20260806-stats-range1';
+import { parseQmtLog } from './parser.mjs?v=20260806-order-status1';
 import { fetchDaily, fetchThirtyMinute } from './market-data.mjs';
 import { drawCandles } from './chart.mjs';
 import { sampleLog } from './sample-log.js';
@@ -6,7 +6,7 @@ import { sampleLog } from './sample-log.js';
 const $ = (selector) => document.querySelector(selector);
 const state = {
   report: null, day: null, stock: null, chartType: 'daily', cache: new Map(), chartRows: [], chartTrades: [],
-  chartView: { bars: { daily: 80, '30m': 120 }, offset: { daily: 0, '30m': 0 } }
+  chartView: { bars: { daily: 80, '30m': 160 }, offset: { daily: 0, '30m': 0 } }
 };
 const styles = { large: '大盘', mid: '中盘', small: '小盘', growth: '成长' };
 const indexes = { '000300.SH': '沪深300', '000905.SH': '中证500', '000852.SH': '中证1000', '399006.SZ': '创业板' };
@@ -53,7 +53,14 @@ function renderAllocation(day) {
 
 function renderTables(day) {
   $('#sectorRows').innerHTML = day.sectors.length ? day.sectors.map(x => `<tr><td>${styles[x.style] || x.style}</td><td>${x.code}</td><td class="score">${x.score.toFixed(1)}</td></tr>`).join('') : '<tr><td colspan="3" class="empty">当日无入选板块</td></tr>';
-  $('#stockRows').innerHTML = day.targets.length ? day.targets.map(x => `<tr data-code="${x.code}" class="${x.code === state.stock?.code ? 'selected' : ''}"><td><b>${x.code}</b><br><small>${x.name || '—'}</small></td><td>${styles[x.style] || x.style}</td><td class="score">${x.score.toFixed(1)}</td><td>${money(day.desired[x.code])}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">当日无入选个股</td></tr>';
+  $('#stockRows').innerHTML = day.targets.length ? day.targets.map(x => {
+    const records = day.deals.length ? day.deals : day.orders.filter(order => order.status !== 'failed');
+    const orders = records.filter(order => order.code === x.code);
+    const bought = orders.filter(order => order.side === 'buy').reduce((sum, order) => sum + order.volume, 0);
+    const sold = orders.filter(order => order.side === 'sell').reduce((sum, order) => sum + order.volume, 0);
+    const executions = [bought ? `买 ${money(bought)}` : '', sold ? `卖 ${money(sold)}` : ''].filter(Boolean).join(' / ');
+    return `<tr data-code="${x.code}" class="${x.code === state.stock?.code ? 'selected' : ''}"><td><b>${x.code}</b><br><small>${x.name || '—'}</small></td><td>${styles[x.style] || x.style}</td><td class="score">${x.score.toFixed(1)}</td><td>${money(day.desired[x.code])}<br><small>${executions || '当日无委托'}</small></td></tr>`;
+  }).join('') : '<tr><td colspan="4" class="empty">当日无入选个股</td></tr>';
   document.querySelectorAll('[data-code]').forEach(row => row.addEventListener('click', () => selectStock(day.targets.find(x => x.code === row.dataset.code))));
 }
 
@@ -64,7 +71,7 @@ function stockTrading(code) {
 function populateStockSelect() {
   const stocks = state.report?.stocks || [];
   $('#chartStockSelect').innerHTML = stocks.length
-    ? stocks.map(stock => `<option value="${stock.code}">${stock.code}${stock.name ? ` ${stock.name}` : ''} · ${stock.orders.length}笔</option>`).join('')
+    ? stocks.map(stock => `<option value="${stock.code}">${stock.code}${stock.name ? ` ${stock.name}` : ''} · ${stock.trades.length}笔</option>`).join('')
     : '<option value="">无买卖记录</option>';
 }
 
@@ -80,10 +87,11 @@ async function selectStock(stock) {
   renderTables(state.day); $('#chartTitle').textContent = `${state.stock.code} ${state.stock.name || ''}`;
   const stockOption = $('#chartStockSelect').querySelector(`option[value="${state.stock.code}"]`);
   if (stockOption) $('#chartStockSelect').value = state.stock.code;
-  const trades = trading?.orders || [];
+  const trades = trading?.trades || [];
+  const sourceLabel = trading?.tradeSource === 'deal' ? '成交' : '有效委托';
   $('#tradeChips').innerHTML = trades.length
-    ? `<span class="chip buy">买入 ${trading.buyCount}笔 · ${money(trading.buyVolume)}股</span><span class="chip sell">卖出 ${trading.sellCount}笔 · ${money(trading.sellVolume)}股</span><span class="trade-range">${trades[0].date} — ${trades.at(-1).date}</span>`
-    : '<span class="empty">该股在回测日志中没有委托记录</span>';
+    ? `<span class="chip buy">${sourceLabel}买入 ${trading.buyCount}笔 · ${money(trading.buyVolume)}股</span><span class="chip sell">${sourceLabel}卖出 ${trading.sellCount}笔 · ${money(trading.sellVolume)}股</span>${trading.failedCount ? `<span class="chip failed">明确失败 ${trading.failedCount}笔</span>` : ''}<span class="trade-range">${trades[0].date} — ${trades.at(-1).date}</span>`
+    : `<span class="empty">该股没有有效委托${trading?.failedCount ? `，明确失败 ${trading.failedCount}笔` : ''}</span>`;
   await renderChart(trades);
 }
 
@@ -101,10 +109,12 @@ async function renderChart(trades = []) {
         : await fetchThirtyMinute(state.stock.code, endDate);
       state.cache.set(key, rows);
     }
-    const latestEndDate = stockTrading(state.stock.code)?.orders.at(-1)?.date || state.day.date;
-    const latestStartDate = stockTrading(state.stock.code)?.orders[0]?.date || state.day.date;
+    const latestTrades = stockTrading(state.stock.code)?.trades || [];
+    const latestEndDate = latestTrades.at(-1)?.date || state.day.date;
+    const latestStartDate = latestTrades[0]?.date || state.day.date;
     if (key !== `${state.chartType}:${state.stock.code}:${latestStartDate}:${latestEndDate}`) return;
     state.chartRows = rows; state.chartTrades = trades;
+    focusLatestCoveredTrade();
     redrawChart();
     $('#chartLoading').classList.add('hidden');
   } catch (error) {
@@ -133,8 +143,31 @@ function redrawChart() {
   }
   const rows = chartViewport();
   drawCandles($('#chart'), rows, state.chartTrades, state.chartRows);
-  const periodNote = state.chartType === 'daily' ? '全部买卖日期' : '腾讯近期分钟行情';
-  $('#chartRange').textContent = `${state.chartType === 'daily' ? '日K' : '30 分钟K'} · ${periodNote} · 显示 ${rows.length} 根（${rows[0].time} — ${rows.at(-1).time}）。滚轮缩放，图内拖动查看区间，右侧边缘调整宽度。`;
+  const sourceStart = String(state.chartRows[0].time).replace(/\D/g, '').slice(0, 8);
+  const sourceEnd = String(state.chartRows.at(-1).time).replace(/\D/g, '').slice(0, 8);
+  const covered = state.chartTrades.filter(trade => {
+    const date = String(trade.date || '').replace(/\D/g, '').slice(0, 8);
+    return date >= sourceStart && date <= sourceEnd;
+  }).length;
+  const coverage = state.chartType === 'daily'
+    ? '覆盖全部买卖日期'
+    : covered
+      ? `腾讯分钟行情覆盖 ${covered}/${state.chartTrades.length} 个买卖点`
+      : `腾讯分钟行情范围外有 ${state.chartTrades.length} 个买卖点，无法在30分钟K上定位`;
+  $('#chartRange').textContent = `${state.chartType === 'daily' ? '日K' : '30 分钟K'} · ${coverage} · 显示 ${rows.length} 根（${rows[0].time} — ${rows.at(-1).time}）。滚轮缩放，图内拖动查看区间，右侧边缘调整宽度。`;
+}
+
+function focusLatestCoveredTrade() {
+  if (state.chartType !== '30m' || !state.chartRows.length || !state.chartTrades.length) return;
+  const tradeDates = new Set(state.chartTrades.map(trade => String(trade.date || '').replace(/\D/g, '').slice(0, 8)));
+  let targetIndex = -1;
+  state.chartRows.forEach((row, index) => {
+    const date = String(row.time || '').replace(/\D/g, '').slice(0, 8);
+    if (tradeDates.has(date)) targetIndex = index;
+  });
+  if (targetIndex < 0) return;
+  const bars = Math.min(state.chartView.bars['30m'], state.chartRows.length);
+  state.chartView.offset['30m'] = Math.max(0, state.chartRows.length - targetIndex - Math.ceil(bars / 2));
 }
 
 function zoomChart(factor) {
@@ -153,7 +186,7 @@ function panChart(steps) {
 }
 
 function resetChartView() {
-  state.chartView.bars[state.chartType] = state.chartType === 'daily' ? 80 : 120;
+  state.chartView.bars[state.chartType] = state.chartType === 'daily' ? 80 : 160;
   state.chartView.offset[state.chartType] = 0;
   redrawChart();
 }
