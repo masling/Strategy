@@ -1,4 +1,4 @@
-const COLORS = { up: '#ef5350', down: '#19a974', grid: '#263248', text: '#8d9bb3', average: '#f6c85f' };
+const COLORS = { up: '#ef5350', down: '#19a974', grid: '#263248', text: '#8d9bb3', average: '#f6c85f', ma7: '#f6c85f', ma13: '#6fb7ff', ma40: '#cf8cff' };
 
 function setup(canvas) {
   const ratio = window.devicePixelRatio || 1;
@@ -13,11 +13,29 @@ function empty(ctx, width, height, text) {
   ctx.fillText(text, width / 2, height / 2);
 }
 
-export function drawCandles(canvas, rows, selectedDate, orders = []) {
+function movingAverages(rows, periods) {
+  const sums = Object.fromEntries(periods.map(period => [period, 0]));
+  return rows.map((row, index) => {
+    const values = {};
+    periods.forEach(period => {
+      sums[period] += row.close;
+      if (index >= period) sums[period] -= rows[index - period].close;
+      values[period] = index >= period - 1 ? sums[period] / period : null;
+    });
+    return values;
+  });
+}
+
+export function drawCandles(canvas, rows, selectedDate, orders = [], sourceRows = rows) {
   const { ctx, width, height } = setup(canvas); ctx.clearRect(0, 0, width, height);
   if (!rows.length) return empty(ctx, width, height, '暂无K线数据');
   const pad = { l: 46, r: 16, t: 20, b: 34 }, chartH = height - pad.t - pad.b;
-  const min = Math.min(...rows.map(r => r.low)), max = Math.max(...rows.map(r => r.high));
+  const periods = [7, 13, 40];
+  const sourceAverages = movingAverages(sourceRows, periods);
+  const averageByTime = new Map(sourceRows.map((row, index) => [row.time, sourceAverages[index]]));
+  const visibleAverages = rows.map(row => averageByTime.get(row.time));
+  const averageValues = visibleAverages.flatMap(values => periods.map(period => values?.[period]).filter(Number.isFinite));
+  const min = Math.min(...rows.map(r => r.low), ...averageValues), max = Math.max(...rows.map(r => r.high), ...averageValues);
   const y = value => pad.t + (max - value) / Math.max(max - min, 0.01) * chartH;
   const step = (width - pad.l - pad.r) / rows.length;
   ctx.strokeStyle = COLORS.grid; ctx.fillStyle = COLORS.text; ctx.font = '11px system-ui';
@@ -30,10 +48,26 @@ export function drawCandles(canvas, rows, selectedDate, orders = []) {
     ctx.strokeStyle = color; ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(x, y(r.high)); ctx.lineTo(x, y(r.low)); ctx.stroke();
     const top = y(Math.max(r.open, r.close)), bottom = y(Math.min(r.open, r.close));
     ctx.fillRect(x - Math.max(1, step * .28), top, Math.max(2, step * .56), Math.max(1, bottom - top));
-    if (r.time.replaceAll('-', '') === selectedDate && orders.length) {
+    if (r.time.replaceAll('-', '').startsWith(selectedDate) && orders.length) {
       ctx.fillStyle = orders.some(o => o.side === 'buy') ? '#ffcf5c' : '#6fb7ff';
       ctx.beginPath(); ctx.moveTo(x, y(r.low) + 14); ctx.lineTo(x - 5, y(r.low) + 23); ctx.lineTo(x + 5, y(r.low) + 23); ctx.fill();
     }
+  });
+  const drawAverage = (period, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
+    let started = false;
+    visibleAverages.forEach((values, index) => {
+      const value = values?.[period];
+      if (!Number.isFinite(value)) return;
+      const x = pad.l + step * (index + .5);
+      if (started) ctx.lineTo(x, y(value)); else { ctx.moveTo(x, y(value)); started = true; }
+    });
+    if (started) ctx.stroke();
+  };
+  drawAverage(7, COLORS.ma7); drawAverage(13, COLORS.ma13); drawAverage(40, COLORS.ma40);
+  ctx.font = '11px system-ui'; ctx.textAlign = 'left';
+  [[7, COLORS.ma7], [13, COLORS.ma13], [40, COLORS.ma40]].forEach(([period, color], index) => {
+    ctx.fillStyle = color; ctx.fillText(`MA${period}`, pad.l + index * 46, 13);
   });
   ctx.fillStyle = COLORS.text; ctx.fillText(rows[0].time, pad.l, height - 8); ctx.textAlign = 'right'; ctx.fillText(rows.at(-1).time, width - pad.r, height - 8);
 }

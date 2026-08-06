@@ -1,14 +1,18 @@
-import { parseQmtLog } from './parser.mjs';
-import { fetchDaily, fetchIntraday } from './market-data.mjs';
-import { drawCandles, drawLine } from './chart.mjs';
+import { parseQmtLog } from './parser.mjs?v=20260806-stats1';
+import { fetchDaily, fetchThirtyMinute } from './market-data.mjs';
+import { drawCandles } from './chart.mjs';
 import { sampleLog } from './sample-log.js';
 
 const $ = (selector) => document.querySelector(selector);
-const state = { report: null, day: null, stock: null, chartType: 'daily', cache: new Map() };
+const state = {
+  report: null, day: null, stock: null, chartType: 'daily', cache: new Map(), chartRows: [], chartTrades: [],
+  chartView: { bars: { daily: 80, '30m': 120 }, offset: { daily: 0, '30m': 0 } }
+};
 const styles = { large: '大盘', mid: '中盘', small: '小盘', growth: '成长' };
 const indexes = { '000300.SH': '沪深300', '000905.SH': '中证500', '000852.SH': '中证1000', '399006.SZ': '创业板' };
 const pct = value => value == null ? '—' : `${(value * 100).toFixed(1)}%`;
 const money = value => value == null ? '—' : new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(value);
+const ratio = value => value == null || !Number.isFinite(value) ? '—' : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`;
 
 function marketLabel(exposure) {
   if (exposure >= .7) return '强势 / 可积极参与';
@@ -18,6 +22,18 @@ function marketLabel(exposure) {
 }
 
 function metric(label, value) { return `<div class="metric"><small>${label}</small><strong>${value}</strong></div>`; }
+
+function renderOverview() {
+  const meta = state.report.meta;
+  const stats = state.report.statistics || { tradingDays: state.report.days.length };
+  $('#backtestStats').innerHTML = [
+    metric('开始时间', meta.startTime || '—'), metric('结束时间', meta.endTime || '—'),
+    metric('交易日', stats.tradingDays || 0), metric('回测周期', meta.period || '—'),
+    metric('初始资产', money(stats.initialAsset)), metric('期末资产', money(stats.finalAsset)),
+    metric('累计收益', ratio(stats.totalReturn)), metric('年化收益', ratio(stats.annualizedReturn)),
+    metric('最大回撤', ratio(stats.maxDrawdown)), metric('夏普比率', stats.sharpe == null ? '—' : stats.sharpe.toFixed(2)),
+  ].join('');
+}
 
 function renderMarket(day) {
   if (!day?.state) { $('#marketView').innerHTML = '当日没有 STATE 记录'; return; }
@@ -43,7 +59,7 @@ function renderTables(day) {
 
 function diagnostic() {
   const meta = state.report.meta;
-  $('#diagnosticText').textContent = [`回测引擎：${meta.engine || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, ...meta.warnings].join('\n');
+  $('#diagnosticText').textContent = [`回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, ...meta.warnings].join('\n');
 }
 
 async function selectStock(stock) {
@@ -57,18 +73,68 @@ async function selectStock(stock) {
 async function renderChart(trades = []) {
   if (!state.stock) return;
   const key = `${state.chartType}:${state.stock.code}:${state.day.date}`;
-  $('#chartLoading').classList.remove('hidden'); $('#chartLoading').textContent = '正在获取公开行情…';
+  $('#chartLoading').classList.remove('hidden'); $('#chartLoading').textContent = '正在获取腾讯财经行情…';
   try {
     let rows = state.cache.get(key);
     if (!rows) {
-      rows = state.chartType === 'daily' ? await fetchDaily(state.stock.code, state.day.date) : await fetchIntraday(state.stock.code);
+      rows = state.chartType === 'daily'
+        ? await fetchDaily(state.stock.code, state.day.date)
+        : await fetchThirtyMinute(state.stock.code, state.day.date);
       state.cache.set(key, rows);
     }
-    if (state.chartType === 'daily') drawCandles($('#chart'), rows, state.day.date, trades); else drawLine($('#chart'), rows);
+    if (key !== `${state.chartType}:${state.stock.code}:${state.day.date}`) return;
+    state.chartRows = rows; state.chartTrades = trades;
+    redrawChart();
     $('#chartLoading').classList.add('hidden');
   } catch (error) {
+    state.chartRows = []; redrawChart();
     $('#chartLoading').textContent = `${error.message}。评分与交易日志仍可正常查看。`;
   }
+}
+
+function chartViewport() {
+  const total = state.chartRows.length;
+  const bars = Math.min(state.chartView.bars[state.chartType], total);
+  const maxOffset = Math.max(total - bars, 0);
+  const offset = Math.min(state.chartView.offset[state.chartType], maxOffset);
+  state.chartView.offset[state.chartType] = offset;
+  return state.chartRows.slice(Math.max(0, total - bars - offset), total - offset);
+}
+
+function redrawChart() {
+  if (!state.stock) return;
+  if (!state.chartRows.length) {
+    drawCandles($('#chart'), [], state.day.date, []);
+    $('#chartRange').textContent = state.chartType === '30m'
+      ? '腾讯财经暂未返回该股票的近期 30 分钟K数据。'
+      : '该交易日暂无日K数据。';
+    return;
+  }
+  const rows = chartViewport();
+  drawCandles($('#chart'), rows, state.day.date, state.chartTrades, state.chartRows);
+  const periodNote = state.chartType === 'daily' ? '按回测日期截断' : '腾讯近期分钟行情';
+  $('#chartRange').textContent = `${state.chartType === 'daily' ? '日K' : '30 分钟K'} · ${periodNote} · 显示 ${rows.length} 根（${rows[0].time} — ${rows.at(-1).time}）。滚轮缩放，图内拖动查看区间，右侧边缘调整宽度。`;
+}
+
+function zoomChart(factor) {
+  if (!state.chartRows.length) return;
+  const current = state.chartView.bars[state.chartType];
+  state.chartView.bars[state.chartType] = Math.max(12, Math.min(state.chartRows.length, Math.round(current * factor)));
+  redrawChart();
+}
+
+function panChart(steps) {
+  if (!state.chartRows.length) return;
+  const bars = Math.min(state.chartView.bars[state.chartType], state.chartRows.length);
+  const maxOffset = Math.max(state.chartRows.length - bars, 0);
+  state.chartView.offset[state.chartType] = Math.max(0, Math.min(maxOffset, state.chartView.offset[state.chartType] + steps));
+  redrawChart();
+}
+
+function resetChartView() {
+  state.chartView.bars[state.chartType] = state.chartType === 'daily' ? 80 : 120;
+  state.chartView.offset[state.chartType] = 0;
+  redrawChart();
 }
 
 function selectDay(date) {
@@ -81,9 +147,9 @@ function selectDay(date) {
 function parse() {
   state.report = parseQmtLog($('#logInput').value);
   const count = state.report.days.length;
-  $('#sourceStatus').textContent = count ? `已解析 ${count} 个交易日` : '未识别到策略日志';
+  $('#sourceStatus').textContent = count ? `已解析 ${count} 个交易日 · ${state.report.meta.startTime || '未知'} 至 ${state.report.meta.endTime || '未知'}` : '未识别到策略日志';
   $('#dateSelect').innerHTML = state.report.days.map(x => `<option value="${x.date}">${x.date.slice(0,4)}-${x.date.slice(4,6)}-${x.date.slice(6)}</option>`).join('');
-  diagnostic(); if (count) { $('.import-panel').classList.remove('open'); selectDay(state.report.days.at(-1).date); } else $('.import-panel').classList.add('open');
+  renderOverview(); diagnostic(); if (count) { $('.import-panel').classList.remove('open'); selectDay(state.report.days.at(-1).date); } else $('.import-panel').classList.add('open');
 }
 
 $('#sampleButton').addEventListener('click', () => { $('#logInput').value = sampleLog; $('.import-panel').classList.add('open'); parse(); });
@@ -91,7 +157,104 @@ $('#parseButton').addEventListener('click', parse);
 $('#logInput').addEventListener('focus', () => $('.import-panel').classList.add('open'));
 $('#fileInput').addEventListener('change', async event => { const file = event.target.files[0]; if (!file) return; $('#logInput').value = await file.text(); parse(); });
 $('#dateSelect').addEventListener('change', event => selectDay(event.target.value));
-document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => { document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === tab)); state.chartType = tab.dataset.chart; selectStock(state.stock); }));
-window.addEventListener('resize', () => state.stock && selectStock(state.stock));
+document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => { const active = x === tab; x.classList.toggle('active', active); x.setAttribute('aria-pressed', String(active)); });
+  state.chartType = tab.dataset.chart; selectStock(state.stock);
+}));
+
+const chartCard = $('#chartCard');
+const resizeHandle = $('#chartResizeHandle');
+const minChartWidth = 620;
+const chartWidthKey = 'qmt-chart-width';
+
+function chartWidthBounds() {
+  return { min: Math.min(minChartWidth, chartCard.parentElement.clientWidth), max: chartCard.parentElement.clientWidth };
+}
+
+function setChartWidth(width, persist = false) {
+  if (window.matchMedia('(max-width: 800px)').matches) {
+    chartCard.style.removeProperty('width');
+    redrawChart();
+    return;
+  }
+  const { min, max } = chartWidthBounds();
+  const next = Math.round(Math.max(min, Math.min(max, width)));
+  chartCard.style.width = `${next}px`;
+  resizeHandle.setAttribute('aria-valuemin', String(min));
+  resizeHandle.setAttribute('aria-valuemax', String(max));
+  resizeHandle.setAttribute('aria-valuenow', String(next));
+  if (persist) localStorage.setItem(chartWidthKey, String(next));
+  redrawChart();
+}
+
+const savedChartWidth = Number(localStorage.getItem(chartWidthKey));
+if (Number.isFinite(savedChartWidth) && savedChartWidth > 0) setChartWidth(savedChartWidth);
+
+resizeHandle.addEventListener('pointerdown', event => {
+  event.preventDefault();
+  const startX = event.clientX, startWidth = chartCard.getBoundingClientRect().width;
+  resizeHandle.setPointerCapture(event.pointerId);
+  const move = moveEvent => setChartWidth(startWidth + moveEvent.clientX - startX);
+  const end = endEvent => {
+    setChartWidth(startWidth + endEvent.clientX - startX, true);
+    resizeHandle.removeEventListener('pointermove', move);
+    resizeHandle.removeEventListener('pointerup', end);
+    resizeHandle.removeEventListener('pointercancel', end);
+  };
+  resizeHandle.addEventListener('pointermove', move);
+  resizeHandle.addEventListener('pointerup', end);
+  resizeHandle.addEventListener('pointercancel', end);
+});
+resizeHandle.addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const { min, max } = chartWidthBounds();
+  const current = chartCard.getBoundingClientRect().width;
+  setChartWidth(event.key === 'Home' ? min : event.key === 'End' ? max : current + (event.key === 'ArrowLeft' ? -40 : 40), true);
+});
+window.addEventListener('resize', () => setChartWidth(chartCard.getBoundingClientRect().width));
+
+const chartCanvas = $('#chart');
+chartCanvas.addEventListener('wheel', event => {
+  event.preventDefault();
+  zoomChart(event.deltaY < 0 ? .8 : 1.25);
+}, { passive: false });
+
+chartCanvas.addEventListener('pointerdown', event => {
+  if (event.button !== 0 || !state.chartRows.length) return;
+  const startX = event.clientX;
+  const startOffset = state.chartView.offset[state.chartType];
+  const visible = chartViewport().length;
+  const step = Math.max((chartCanvas.clientWidth - 62) / Math.max(visible, 1), 1);
+  chartCanvas.setPointerCapture(event.pointerId);
+  const move = moveEvent => {
+    const shiftedBars = Math.round((moveEvent.clientX - startX) / step);
+    const bars = Math.min(state.chartView.bars[state.chartType], state.chartRows.length);
+    const maxOffset = Math.max(state.chartRows.length - bars, 0);
+    state.chartView.offset[state.chartType] = Math.max(0, Math.min(maxOffset, startOffset + shiftedBars));
+    redrawChart();
+  };
+  const end = () => {
+    chartCanvas.removeEventListener('pointermove', move);
+    chartCanvas.removeEventListener('pointerup', end);
+    chartCanvas.removeEventListener('pointercancel', end);
+  };
+  chartCanvas.addEventListener('pointermove', move);
+  chartCanvas.addEventListener('pointerup', end);
+  chartCanvas.addEventListener('pointercancel', end);
+});
+
+chartCanvas.addEventListener('keydown', event => {
+  const key = event.key;
+  if (!['+', '=', '-', '_', 'ArrowLeft', 'ArrowRight', 'Home', 'End', '0'].includes(key)) return;
+  event.preventDefault();
+  if (key === '+' || key === '=') zoomChart(.8);
+  else if (key === '-' || key === '_') zoomChart(1.25);
+  else if (key === 'ArrowLeft') panChart(Math.max(1, Math.round(state.chartView.bars[state.chartType] / 6)));
+  else if (key === 'ArrowRight') panChart(-Math.max(1, Math.round(state.chartView.bars[state.chartType] / 6)));
+  else if (key === 'Home') panChart(Number.MAX_SAFE_INTEGER);
+  else if (key === 'End') panChart(-Number.MAX_SAFE_INTEGER);
+  else resetChartView();
+});
 
 $('#logInput').value = sampleLog; parse();

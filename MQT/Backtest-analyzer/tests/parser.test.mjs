@@ -42,3 +42,29 @@ STATE 20250804 exposure 0.6 style_exposures {} scores {}`);
   assert.equal(result.days[0].portfolio, null);
   assert.equal(result.days[1].portfolio.balance, 990000);
 });
+
+test('derives backtest range and performance statistics from daily snapshots', () => {
+  const result = parseQmtLog(`ENGINE period 5m start -1 end -1
+PORTFOLIO source virtual_account balance 100 cash 100 positions 0
+STATE 20250102 exposure 0 style_exposures {} scores {}
+PORTFOLIO source virtual_account balance 120 cash 120 positions 0
+STATE 20250103 exposure 0 style_exposures {} scores {}
+PORTFOLIO source virtual_account balance 90 cash 90 positions 0
+STATE 20250106 exposure 0 style_exposures {} scores {}`);
+  assert.equal(result.meta.period, '5m');
+  assert.equal(result.meta.startTime, '2025-01-02');
+  assert.equal(result.meta.endTime, '2025-01-06');
+  assert.equal(result.statistics.tradingDays, 3);
+  assert.equal(result.statistics.initialAsset, 100);
+  assert.equal(result.statistics.finalAsset, 90);
+  assert.ok(Math.abs(result.statistics.totalReturn + 0.1) < 1e-12);
+  assert.ok(Math.abs(result.statistics.maxDrawdown + 0.25) < 1e-12);
+});
+
+test('uses actual backtest range emitted by the strategy', () => {
+  const result = parseQmtLog(`ENGINE period 5m start -1 end -1
+BACKTEST_RANGE start 2025-01-02 09:35:00 end 2025-01-06 15:00:00
+STATE 20250102 exposure 0 style_exposures {} scores {}`);
+  assert.equal(result.meta.startTime, '2025-01-02 09:35:00');
+  assert.equal(result.meta.endTime, '2025-01-06 15:00:00');
+});

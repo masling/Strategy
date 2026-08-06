@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.5.1_20260805_QMT_VISIBLE_BACKTEST_ORDERS
+# DOWNLOAD_BUILD: V1.5.2_20260806_BACKTEST_STATS_RANGE
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_1"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_5_2"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -891,6 +891,19 @@ def _backtest_trade_day(context):
     return _record_trade_day(value)
 
 
+def _backtest_order_price(context, code):
+    try:
+        price_map = context.get_history_data(1, "5m", "open", 3) or {}
+        values = price_map.get(code, [])
+        if len(values) > 0:
+            price = float(values[-1])
+            if np.isfinite(price) and price > 0.0:
+                return price
+    except Exception as error:
+        print("WARNING backtest fixed price unavailable:", code, error)
+    return None
+
+
 def _portfolio_log_due(context):
     trade_day = _backtest_trade_day(context) or "UNKNOWN"
     if getattr(A, "last_portfolio_log_date", "") == trade_day:
@@ -903,8 +916,10 @@ def _backtest_snapshot(context):
     virtual_snapshot = _virtual_backtest_snapshot()
     if virtual_snapshot is not None:
         if _portfolio_log_due(context):
+            capital, _ = _backtest_capital(context)
             print(
                 "PORTFOLIO", "source", "virtual_account",
+                "capital", capital,
                 "balance", virtual_snapshot["balance"],
                 "cash", virtual_snapshot["available_cash"],
                 "positions", len(virtual_snapshot["positions"]),
@@ -1064,9 +1079,12 @@ def _send_order(context, side, code, volume, trade_date, reason):
     try:
         if A.mode == "BACKTEST":
             signed_volume = volume if side == "buy" else -volume
-            order_shares(
-                code, signed_volume, "lastest", -1, context, A.acct
-            )
+            fixed_price = _backtest_order_price(context, code)
+            if fixed_price is None:
+                print("ERROR backtest order skipped, invalid price:", code)
+                return False
+            order_shares(code, signed_volume, "fix", fixed_price,
+                         context, context.accountID)
         else:
             operation = A.buy_code if side == "buy" else A.sell_code
             passorder(
@@ -1558,6 +1576,9 @@ def init(context):
     A.sector_source_logged = set()
     A.first_bar_logged = False
     A.last_portfolio_log_date = ""
+    A.actual_backtest_start = None
+    A.actual_backtest_end = None
+    A.last_range_log_date = ""
     print("INIT", STRATEGY_NAME, A.mode, A.acct, A.acct_type)
     if A.mode == "BACKTEST":
         print(
@@ -1583,7 +1604,21 @@ def handlebar(context):
         if not A.first_bar_logged:
             print("FIRST_BAR", bar_time.strftime("%Y-%m-%d %H:%M:%S"))
             A.first_bar_logged = True
+            A.actual_backtest_start = bar_time
+        A.actual_backtest_end = bar_time
         trade_date = bar_time.strftime("%Y%m%d")
+        range_due = bar_time.strftime("%H%M%S") >= "150000"
+        try:
+            range_due = range_due or bool(context.is_last_bar())
+        except Exception:
+            pass
+        if range_due and A.last_range_log_date != trade_date:
+            print(
+                "BACKTEST_RANGE", "start",
+                A.actual_backtest_start.strftime("%Y-%m-%d %H:%M:%S"),
+                "end", A.actual_backtest_end.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            A.last_range_log_date = trade_date
         asof = (bar_time - datetime.timedelta(days=1)).strftime("%Y%m%d")
     else:
         if not context.is_last_bar():

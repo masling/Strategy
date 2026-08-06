@@ -1,13 +1,16 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QMT 回测分析器</title><link rel="stylesheet" href="./styles.css"></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QMT 回测分析器</title><link rel="stylesheet" href="./styles.css"><style>@media(min-width:801px){.chart-card{position:relative;width:min(980px,100%);min-width:620px;max-width:100%;justify-self:start}.data-note{padding-right:14px}.chart-resize-handle{position:absolute;top:18px;right:-7px;bottom:18px;width:14px;cursor:ew-resize;touch-action:none;z-index:1}.chart-resize-handle:after{content:"";position:absolute;top:42%;left:5px;width:3px;height:54px;border-radius:4px;background:linear-gradient(var(--line),var(--blue),var(--line));opacity:.65}.chart-resize-handle:hover:after,.chart-resize-handle:focus-visible:after{opacity:1;box-shadow:0 0 0 3px rgba(111,183,255,.18)}}.chart-shell{user-select:none}.chart-shell canvas{cursor:grab;outline:none}.chart-shell canvas:active{cursor:grabbing}@media(max-width:800px){.chart-card{width:100%;min-width:0}.chart-resize-handle{display:none}}</style></head>
 <body>
+  <style>.overview-panel{min-height:0}.overview-grid{grid-template-columns:repeat(4,1fr)}@media(max-width:800px){.overview-grid{grid-template-columns:repeat(2,1fr)}}</style>
   <header><div><span class="eyebrow">QMT STRATEGY LAB</span><h1>回测分析器</h1><p>把策略日志还原为大盘、板块、个股与交易点的时间切片。</p></div><div class="status" id="sourceStatus">等待导入日志</div></header>
   <main>
     <section class="import-panel">
       <div class="toolbar"><label class="file-button">导入 .log / .txt<input id="fileInput" type="file" accept=".log,.txt,text/plain"></label><button id="sampleButton">载入示例</button><button id="parseButton" class="primary">解析日志</button><label class="date-label">交易日<select id="dateSelect"></select></label></div>
       <textarea id="logInput" spellcheck="false" placeholder="粘贴 QMT 完整回测输出，或导入日志文件……"></textarea>
     </section>
+
+    <article class="overview-panel"><div class="section-title"><span>00</span>回测统计</div><div id="backtestStats" class="metric-grid overview-grid empty">导入日志后显示</div></article>
 
     <section class="summary-grid">
       <article class="market-card"><div class="section-title"><span>01</span>大盘全局判断</div><div id="marketView" class="market-view empty">导入日志后显示</div></article>
@@ -19,13 +22,14 @@
       <article><div class="section-title"><span>04</span>个股评分</div><div class="table-wrap"><table><thead><tr><th>代码 / 名称</th><th>风格</th><th>评分</th><th>目标股数</th></tr></thead><tbody id="stockRows"></tbody></table></div></article>
     </section>
 
-    <section class="chart-card">
-      <div class="chart-head"><div><div class="section-title"><span>05</span>行情与买卖点</div><h2 id="chartTitle">选择个股</h2></div><div class="tabs"><button class="tab active" data-chart="daily">日K</button><button class="tab" data-chart="intraday">分时</button></div></div>
-      <div id="tradeChips" class="trade-chips"></div><div class="chart-shell"><canvas id="chart"></canvas><div id="chartLoading" class="chart-loading hidden"></div></div>
-      <p class="data-note">行情来自东方财富公开接口；日K按所选回测日期截断，分时仅代表最近交易日，不冒充历史分时。</p>
+    <section id="chartCard" class="chart-card">
+      <div class="chart-head"><div><div class="section-title"><span>05</span>行情与买卖点</div><h2 id="chartTitle">选择个股</h2></div><div class="tabs"><button class="tab active" data-chart="daily" aria-pressed="true">日K</button><button class="tab" data-chart="30m" aria-pressed="false">30 分钟K</button></div></div>
+      <div id="tradeChips" class="trade-chips"></div><div class="chart-shell"><canvas id="chart" tabindex="0" aria-label="行情K线图：滚轮缩放，拖动查看前后区间"></canvas><div id="chartLoading" class="chart-loading hidden"></div></div>
+      <p id="chartRange" class="data-note">行情来自腾讯财经公开接口；日K按所选回测日期截断，30 分钟K展示腾讯可提供的近期区间。滚轮缩放，图内拖动查看区间，右侧边缘调整宽度。</p>
+      <div id="chartResizeHandle" class="chart-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整行情图表宽度" tabindex="0"></div>
     </section>
 
     <section class="diagnostics"><details><summary>解析信息与警告</summary><pre id="diagnosticText"></pre></details></section>
   </main>
-  <script type="module" src="./app.mjs"></script>
+  <script type="module" src="./app.mjs?v=20260806-stats1"></script>
 </body></html>

@@ -439,7 +439,14 @@ class QmtAdapterTests(unittest.TestCase):
 
     def test_backtest_order_uses_order_shares_for_visible_trade_records(self):
         class FakeContext(object):
-            pass
+            accountID = "testS"
+
+            @staticmethod
+            def get_history_data(*args):
+                return {
+                    "000001.SZ": [10.25],
+                    "600000.SH": [8.50],
+                }
 
         original_order_shares = getattr(strategy, "order_shares", None)
         had_order_shares = hasattr(strategy, "order_shares")
@@ -465,8 +472,8 @@ class QmtAdapterTests(unittest.TestCase):
                 "20260805", "risk_stop",
             ))
             self.assertEqual(calls, [
-                ("000001.SZ", 1000, "lastest", -1, context, "testS"),
-                ("600000.SH", -500, "lastest", -1, context, "testS"),
+                ("000001.SZ", 1000, "fix", 10.25, context, "testS"),
+                ("600000.SH", -500, "fix", 8.50, context, "testS"),
             ])
         finally:
             if had_order_shares:
