@@ -407,10 +407,36 @@ class StockSelectionTests(unittest.TestCase):
             "close": 28.16, "low": 27.98, "previous_high": 28.04,
             "ma7": 28.25, "ma13": 27.41, "ma40": 26.46,
             "ma7_slope3": 0.0099, "ma13_slope3": 0.0206,
+            "ma7_prev1": 28.253, "recent_pullback": 0.067,
         }
         self.assertEqual(
             invoke("trend_add_signal", metrics, 8, "ma40_starter"),
             "ma7",
+        )
+
+    def test_shallow_ma7_touch_does_not_trigger_add(self):
+        metrics = {
+            "close": 10.4, "low": 10.0, "previous_high": 10.3,
+            "ma7": 10.0, "ma7_prev1": 9.98,
+            "ma13": 9.5, "ma40": 9.0,
+            "ma7_slope3": 0.01, "ma13_slope3": 0.006,
+            "recent_pullback": 0.03,
+        }
+        self.assertIsNone(
+            invoke("trend_add_signal", metrics, 5, "ma40_starter")
+        )
+
+    def test_ma13_touch_has_priority_when_both_supports_are_near(self):
+        metrics = {
+            "close": 10.3, "low": 10.0, "previous_high": 10.2,
+            "ma7": 10.1, "ma7_prev1": 10.0,
+            "ma13": 9.95, "ma40": 9.0,
+            "ma7_slope3": 0.01, "ma13_slope3": 0.006,
+            "recent_pullback": 0.08,
+        }
+        self.assertEqual(
+            invoke("trend_add_signal", metrics, 5, "ma40_starter"),
+            "ma13",
         )
 
     def test_salt_lake_february_24_is_secondary_base_reclaim(self):
@@ -689,8 +715,34 @@ class IntradayAggregationTests(unittest.TestCase):
             "amount": [1000.0, 1200.0],
         }, index=pd.to_datetime(["2026-08-03 10:00", "2026-08-03 10:30"]))
         self.assertEqual(
-            invoke("intraday_action", frame, 10.0, 9.7, True), "add_ma7"
+            invoke("intraday_action", frame, 10.0, 9.7, True,
+                   True, 0, 0, True),
+            "add_ma7",
         )
+
+    def test_30m_shallow_ma7_touch_waits_for_ma13(self):
+        frame = pd.DataFrame({
+            "open": [10.1, 10.2], "high": [10.3, 10.6],
+            "low": [9.95, 10.0], "close": [10.1, 10.5],
+            "volume": [100.0, 120.0], "amount": [1000.0, 1200.0],
+        })
+        self.assertIsNone(
+            invoke("intraday_action", frame, 10.0, 9.7, True,
+                   True, 0, 0, False)
+        )
+
+    def test_ma7_pullback_requires_six_percent_and_non_turning_ma7(self):
+        metrics = {"ma7": 10.0, "ma7_prev1": 9.99}
+        self.assertTrue(
+            invoke("ma7_pullback_add_ready", metrics, 11.0, 10.3)
+        )
+        self.assertFalse(
+            invoke("ma7_pullback_add_ready", metrics, 11.0, 10.5)
+        )
+        self.assertFalse(invoke(
+            "ma7_pullback_add_ready",
+            {"ma7": 9.95, "ma7_prev1": 10.0}, 11.0, 10.3,
+        ))
 
     def test_addback_resumes_remaining_tranche_after_ma7_rebound(self):
         frame = pd.DataFrame({

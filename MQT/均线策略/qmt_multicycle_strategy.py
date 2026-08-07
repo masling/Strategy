@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.7.2_20260807_BASE_REVERSAL_ENTRY
+# DOWNLOAD_BUILD: V1.7.3_20260807_MA13_FIRST_ADDBACK
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_7_2"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_7_3"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -46,6 +46,8 @@ STARTER_SUPPORT_TOLERANCE = 0.035
 STARTER_MIN_MA13_SLOPE_3D = -0.008
 TREND_ADD_WINDOW_DAYS = 15
 TREND_ADD_SUPPORT_TOLERANCE = 0.02
+MA7_ADD_MIN_PULLBACK = 0.06
+MA7_ADD_MAX_ROLLOVER = 0.001
 BASE_RECLAIM_SUPPORT_TOLERANCE = 0.04
 BASE_RECLAIM_MAX_DISTANCE_MA40 = 0.15
 BASE_RECLAIM_RESUME_DAYS = 3
@@ -572,22 +574,35 @@ def position_metrics(frame):
         return None
     close = np.asarray(data["close"], dtype=float)
     ma7 = float(np.mean(close[-7:]))
+    ma7_prev1 = float(np.mean(close[-8:-1]))
     ma13 = float(np.mean(close[-13:]))
     ma40 = float(np.mean(close[-40:]))
     ma7_prev3 = float(np.mean(close[-10:-3]))
     ma13_prev3 = float(np.mean(close[-16:-3]))
     ma40_prev5 = float(np.mean(close[-45:-5]))
+    recent = data.iloc[-10:]
+    recent_high = np.asarray(recent["high"], dtype=float)
+    recent_low = np.asarray(recent["low"], dtype=float)
+    peak_index = int(np.argmax(recent_high))
+    peak_price = float(recent_high[peak_index])
+    post_peak_low = float(np.min(recent_low[peak_index:]))
+    recent_pullback = (
+        1.0 - post_peak_low / peak_price
+        if peak_price > 0.0 and post_peak_low > 0.0 else 0.0
+    )
     return {
         "close": float(close[-1]),
         "high": float(data["high"].iloc[-1]),
         "low": float(data["low"].iloc[-1]),
         "previous_high": float(data["high"].iloc[-2]),
         "ma7": ma7,
+        "ma7_prev1": ma7_prev1,
         "ma13": ma13,
         "ma40": ma40,
         "ma7_slope3": ma7 / ma7_prev3 - 1.0,
         "ma13_slope3": ma13 / ma13_prev3 - 1.0,
         "ma40_slope5": ma40 / ma40_prev5 - 1.0,
+        "recent_pullback": recent_pullback,
         "atr": _atr(data, 14),
     }
 
@@ -800,6 +815,24 @@ def addback_trend_ready(metrics, peak_price=None):
     )
 
 
+def ma7_pullback_add_ready(metrics, peak_price=None, pullback_low=None):
+    if not metrics:
+        return False
+    ma7 = float(metrics.get("ma7", 0.0))
+    ma7_prev1 = float(metrics.get("ma7_prev1", 0.0))
+    if ma7 <= 0.0 or ma7_prev1 <= 0.0:
+        return False
+    if ma7 < ma7_prev1 * (1.0 - MA7_ADD_MAX_ROLLOVER):
+        return False
+    if peak_price is not None and pullback_low is not None:
+        peak = float(peak_price)
+        low = float(pullback_low)
+        pullback = 1.0 - low / peak if peak > 0.0 and low > 0.0 else 0.0
+    else:
+        pullback = float(metrics.get("recent_pullback", 0.0))
+    return pullback >= MA7_ADD_MIN_PULLBACK
+
+
 def trend_add_signal(metrics, age, setup=""):
     if not metrics or int(age) > TREND_ADD_WINDOW_DAYS:
         return None
@@ -819,8 +852,11 @@ def trend_add_signal(metrics, age, setup=""):
         return None
     distance7 = abs(low / ma7 - 1.0)
     distance13 = abs(low / ma13 - 1.0)
-    if min(distance7, distance13) <= TREND_ADD_SUPPORT_TOLERANCE:
-        return "ma7" if distance7 <= distance13 else "ma13"
+    if distance13 <= TREND_ADD_SUPPORT_TOLERANCE:
+        return "ma13"
+    if (distance7 <= TREND_ADD_SUPPORT_TOLERANCE
+            and ma7_pullback_add_ready(metrics)):
+        return "ma7"
     if (str(setup) == "base_reclaim"
             and int(age) <= BASE_RECLAIM_RESUME_DAYS
             and close > ma7):
@@ -840,7 +876,8 @@ def _confirmed_30m_reversal(previous, latest):
 
 
 def intraday_action(frame30, ma7, ma13, reduced, trend_ready=True,
-                    addback_stage=0, addback_age=0):
+                    addback_stage=0, addback_age=0,
+                    ma7_add_ready=False):
     if frame30 is None or len(frame30) < 2:
         return None
     data = frame30.replace([np.inf, -np.inf], np.nan).dropna(
@@ -865,10 +902,10 @@ def intraday_action(frame30, ma7, ma13, reduced, trend_ready=True,
             and abs(float(previous["low"]) / float(ma13) - 1.0)
             <= ADDBACK_SUPPORT_TOLERANCE
         )
-        if int(addback_stage) <= 0 and near_ma7:
-            return "add_ma7"
         if near_ma13:
             return "add_ma13"
+        if int(addback_stage) <= 0 and near_ma7 and ma7_add_ready:
+            return "add_ma7"
         if (int(addback_stage) == 1
                 and float(latest["close"]) > float(ma7)):
             return "add_resume"
@@ -1940,11 +1977,21 @@ def run_intraday_cycle(context, end_time, trade_date):
         reduced = float(A.intraday_scales.get(code, 1.0)) < 0.999
         plan = A.addback_plans.get(code)
         daily_metrics = A.daily_position_metrics.get(code, feature)
+        previous_low = (
+            float(bars30.iloc[-2]["low"])
+            if len(bars30) >= 2 else 0.0
+        )
+        ma7_add_allowed = bool(
+            plan and ma7_pullback_add_ready(
+                daily_metrics, plan.get("peak_price"), previous_low
+            )
+        )
         action = intraday_action(
             bars30, daily_metrics["ma7"], daily_metrics["ma13"], reduced,
             addback_trend_ready(daily_metrics),
             int((plan or {}).get("stage", 0)),
             int((plan or {}).get("age", ADDBACK_WINDOW_DAYS + 1)),
+            ma7_add_allowed,
         )
         if action == "reduce":
             current = int(positions[code].get("volume", 0))
@@ -1980,6 +2027,7 @@ def run_intraday_cycle(context, end_time, trade_date):
                         "reduced_volume": volume,
                         "first_volume": first_volume,
                         "added_volume": 0,
+                        "peak_price": peak_price,
                     }
                 else:
                     A.addback_plans.pop(code, None)
