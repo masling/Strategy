@@ -328,6 +328,32 @@ class StockSelectionTests(unittest.TestCase):
         })
         self.assertIsNone(setup)
 
+    def test_shengtun_september_5_rejects_expanded_ma7_ma13_gap(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 8.702, "low": 8.332, "previous_high": 9.042,
+            "ma7": 8.628, "ma7_prev1": 8.505, "ma7_prev2": 8.456,
+            "ma13": 8.292, "ma40": 7.835,
+            "ma13_prev": 8.05, "ma40_prev": 7.75,
+            "ma7_slope3": 0.02, "ma13_slope3": 0.012,
+            "distance_ma40": 8.702 / 7.835 - 1.0,
+            "ma7_ma13_gap": 8.628 / 8.292 - 1.0,
+            "ma13_ma40_gap": 8.292 / 7.835 - 1.0,
+        })
+        self.assertIsNone(setup)
+
+    def test_shengtun_september_26_is_ma40_starter(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 8.962, "low": 8.512, "previous_high": 8.702,
+            "ma7": 8.359, "ma7_prev1": 8.315, "ma7_prev2": 8.338,
+            "ma13": 8.517, "ma40": 8.244,
+            "ma13_prev": 8.558, "ma40_prev": 8.169,
+            "ma7_slope3": -0.0051, "ma13_slope3": -0.0048,
+            "distance_ma40": 8.962 / 8.244 - 1.0,
+            "ma7_ma13_gap": 8.359 / 8.517 - 1.0,
+            "ma13_ma40_gap": 8.517 / 8.244 - 1.0,
+        })
+        self.assertEqual(setup, "ma40_starter")
+
     def test_entry_structure_score_prefers_smooth_lower_position(self):
         smooth = {
             "distance_ma40": 0.12, "distance_ma13": 0.03,
@@ -598,6 +624,13 @@ class RiskAndSizingTests(unittest.TestCase):
         }}
         self.assertTrue(invoke("buy_entry_price_allowed", 107.0, candidate))
         self.assertFalse(invoke("buy_entry_price_allowed", 109.5, candidate))
+
+    def test_shengtun_october_gap_open_is_not_a_valid_entry_price(self):
+        candidate = {"feature": {
+            "entry_setup": "trend", "close": 10.322,
+            "ma7": 10.302, "ma40": 8.646,
+        }}
+        self.assertFalse(invoke("buy_entry_price_allowed", 11.0, candidate))
 
 
 class IntradayAggregationTests(unittest.TestCase):
