@@ -70,6 +70,43 @@ class MarketRegimeTests(unittest.TestCase):
         self.assertTrue(all(abs(value - 0.20) < 1e-12
                             for value in budgets.values()))
 
+    def test_one_strong_style_with_three_active_sectors_reaches_sixty_percent(self):
+        budgets = invoke(
+            "sector_rotation_exposure_map",
+            {"000300.SH": 100.0},
+            {"000300.SH": [
+                {"score": 85.0}, {"score": 75.0}, {"score": 70.0},
+            ]},
+        ) or {}
+        self.assertEqual(budgets, {"000300.SH": 0.60})
+
+    def test_watch_style_exposure_follows_active_sector_count(self):
+        budgets = invoke(
+            "sector_rotation_exposure_map",
+            {"000300.SH": 75.0},
+            {"000300.SH": [{"score": 80.0}, {"score": 65.0}]},
+        ) or {}
+        self.assertEqual(budgets, {"000300.SH": 0.30})
+
+    def test_style_without_active_sector_has_no_exposure(self):
+        budgets = invoke(
+            "sector_rotation_exposure_map",
+            {"000300.SH": 100.0}, {"000300.SH": []},
+        ) or {}
+        self.assertEqual(budgets, {})
+
+    def test_sector_driven_style_budgets_keep_eighty_percent_total_cap(self):
+        budgets = invoke(
+            "sector_rotation_exposure_map",
+            {"000300.SH": 100.0, "399006.SZ": 100.0},
+            {
+                "000300.SH": [{"score": 80.0}] * 3,
+                "399006.SZ": [{"score": 80.0}] * 3,
+            },
+        ) or {}
+        self.assertAlmostEqual(sum(budgets.values()), 0.80)
+        self.assertEqual(budgets, {"000300.SH": 0.4, "399006.SZ": 0.4})
+
     def test_market_state_reads_daily_data_only(self):
         class FakeContext(object):
             def __init__(self):
@@ -503,6 +540,22 @@ class RiskAndSizingTests(unittest.TestCase):
             {}, {"A": 10.0},
         )
         self.assertEqual(desired, {"A": 7500})
+
+    def test_four_names_can_realize_sixty_percent_rotation_exposure(self):
+        strategy.A.blocked_codes = set()
+        strategy.A.intraday_scales = {}
+        strategy.A.entry_scales = {}
+        candidates = [
+            {"code": code, "style": "S1", "feature": {"close": 10.0}}
+            for code in ("A", "B", "C", "D")
+        ]
+        desired = invoke(
+            "_desired_share_map", {"balance": 1000000.0}, {"S1": 0.60},
+            candidates, {}, {code: 10.0 for code in ("A", "B", "C", "D")},
+        ) or {}
+        self.assertEqual(
+            desired, {"A": 15000, "B": 15000, "C": 15000, "D": 15000}
+        )
 
     def test_new_entry_execution_price_must_remain_near_ma7(self):
         candidate = {"feature": {

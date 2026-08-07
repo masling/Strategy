@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.6.4_20260807_ENTRY_PRICE_GUARD
+# DOWNLOAD_BUILD: V1.7.0_20260807_SECTOR_DRIVEN_EXPOSURE
 
 import datetime
 
@@ -8,11 +8,11 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_6_4"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_7_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
-MAX_STOCKS_PER_STYLE = 2
+MAX_STOCKS_PER_STYLE = 4
 STOCK_CANDIDATE_POOL_PER_STYLE = 6
 MAX_PER_SECTOR = 2
 MAX_STOCK_WEIGHT = 0.15
@@ -178,6 +178,39 @@ def style_exposure_map(scores, max_total=MAX_TOTAL_EXPOSURE):
             budgets[code] = STYLE_STRONG_EXPOSURE
         elif float(score) >= STYLE_WATCH_SCORE:
             budgets[code] = STYLE_WATCH_EXPOSURE
+    total = sum(budgets.values())
+    if total > float(max_total) and total > 0.0:
+        scale = float(max_total) / total
+        budgets = {
+            code: round(value * scale, 10)
+            for code, value in budgets.items()
+        }
+    return budgets
+
+
+def sector_rotation_exposure_map(scores, sectors_by_style,
+                                 max_total=MAX_TOTAL_EXPOSURE):
+    budgets = {}
+    for code, sector_items in (sectors_by_style or {}).items():
+        score = float((scores or {}).get(code, 0.0))
+        if score < STYLE_WATCH_SCORE:
+            continue
+        sector_scores = [
+            float(item.get("score", 0.0))
+            for item in (sector_items or [])
+        ]
+        count = min(MAX_SECTORS_PER_STYLE, len(sector_scores))
+        if count <= 0:
+            continue
+        average_score = sum(sector_scores[:count]) / float(count)
+        if score >= STYLE_STRONG_SCORE:
+            exposure = 0.20 + 0.10 * count
+            if count >= 2 and average_score >= 70.0:
+                exposure += 0.10
+            exposure = min(0.60, exposure)
+        else:
+            exposure = min(0.40, 0.10 + 0.10 * count)
+        budgets[code] = round(exposure, 10)
     total = sum(budgets.values())
     if total > float(max_total) and total > 0.0:
         scale = float(max_total) / total
@@ -1985,29 +2018,33 @@ def run_intraday_cycle(context, end_time, trade_date):
 
 def run_daily_cycle(context, asof, trade_date):
     market = _market_state(context, asof)
-    exposure = float(market["exposure"])
-    style_exposures = market["style_exposures"]
+    market_gate_exposures = dict(market["style_exposures"])
     snapshot = _account_snapshot(context)
     if snapshot is None:
         return
     _refresh_owned_codes(snapshot)
     _advance_position_plans(trade_date)
 
-    style_changed = style_exposures != A.last_style_exposures
+    style_changed = market_gate_exposures != A.last_market_gate_exposures
     rebalance_due = A.rebalance_age >= REBALANCE_EVERY or style_changed
     selected_sectors = []
+    style_exposures = dict(A.current_style_exposures)
 
-    if exposure <= 0.0:
+    if not market_gate_exposures:
+        style_exposures = {}
         A.target_candidates = []
         A.desired_shares = {
             code: 0 for code in _managed_positions(snapshot).keys()
         }
     elif rebalance_due:
-        members_by_style = _style_members(context, style_exposures.keys())
+        members_by_style = _style_members(
+            context, market_gate_exposures.keys()
+        )
         targets = []
         used_codes = set()
+        sectors_by_style = {}
         ordered_styles = sorted(
-            style_exposures.keys(),
+            market_gate_exposures.keys(),
             key=lambda code: market["details"].get(code, 0.0),
             reverse=True,
         )
@@ -2019,12 +2056,21 @@ def run_daily_cycle(context, asof, trade_date):
             sectors = _sector_selection(
                 context, asof, benchmark, members, style
             )
+            sectors_by_style[style] = sectors
             selected_sectors.extend(sectors)
             for item in _stock_selection(context, asof, sectors):
                 if item["code"] in used_codes:
                     continue
                 used_codes.add(item["code"])
                 targets.append(item)
+        style_exposures = sector_rotation_exposure_map(
+            market["details"], sectors_by_style
+        )
+        targets = [
+            item for item in targets
+            if item.get("style") in style_exposures
+        ]
+        used_codes = {item["code"] for item in targets}
         A.target_candidates = targets
         A.blocked_codes = set()
         held_codes = set(_managed_positions(snapshot).keys())
@@ -2073,7 +2119,11 @@ def run_daily_cycle(context, asof, trade_date):
         )
         A.rebalance_age = 0
 
-    if not rebalance_due or exposure <= 0.0:
+    exposure = round(sum(style_exposures.values()), 10)
+    market["style_exposures"] = dict(style_exposures)
+    market["exposure"] = exposure
+
+    if not rebalance_due or not style_exposures:
         execution_codes = (
             set(_managed_positions(snapshot).keys())
             | {item["code"] for item in A.target_candidates}
@@ -2096,7 +2146,7 @@ def run_daily_cycle(context, asof, trade_date):
         )
         print("DESIRED", trade_date, A.desired_shares)
     should_rebalance = (
-        rebalance_due or exposure <= 0.0
+        rebalance_due or not market_gate_exposures
         or A.retry_rebalance or exit_sent or trend_add_due
     )
     if should_rebalance:
@@ -2105,6 +2155,7 @@ def run_daily_cycle(context, asof, trade_date):
         )
     A.rebalance_age += 1
     A.last_exposure = exposure
+    A.last_market_gate_exposures = dict(market_gate_exposures)
     A.last_style_exposures = dict(style_exposures)
     A.current_style_exposures = dict(style_exposures)
     _print_daily_summary(
@@ -2142,6 +2193,7 @@ def init(context):
     A.sell_code = 24 if A.acct_type == "STOCK" else 34
     A.rebalance_age = REBALANCE_EVERY
     A.last_exposure = None
+    A.last_market_gate_exposures = {}
     A.last_style_exposures = {}
     A.current_style_exposures = {}
     A.last_processed_date = ""
