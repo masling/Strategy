@@ -302,6 +302,32 @@ class StockSelectionTests(unittest.TestCase):
         })
         self.assertIsNone(setup)
 
+    def test_shanghai_xinyang_september_entry_rejects_ma7_rollover(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 55.682, "low": 54.622, "previous_high": 59.022,
+            "ma7": 55.642, "ma7_prev1": 55.419, "ma7_prev2": 55.479,
+            "ma13": 53.501, "ma40": 50.0,
+            "ma13_prev": 51.8, "ma40_prev": 49.5,
+            "ma7_slope3": 0.025, "ma13_slope3": 0.02,
+            "distance_ma40": 55.682 / 50.0 - 1.0,
+            "ma7_ma13_gap": 55.642 / 53.501 - 1.0,
+            "ma13_ma40_gap": 53.501 / 50.0 - 1.0,
+        })
+        self.assertIsNone(setup)
+
+    def test_shanghai_xinyang_october_entry_rejects_ma40_distance(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 61.672, "low": 60.672, "previous_high": 63.312,
+            "ma7": 61.229, "ma7_prev1": 60.298, "ma7_prev2": 59.185,
+            "ma13": 57.680, "ma40": 53.125,
+            "ma13_prev": 55.8, "ma40_prev": 51.5,
+            "ma7_slope3": 0.05, "ma13_slope3": 0.03,
+            "distance_ma40": 61.672 / 53.125 - 1.0,
+            "ma7_ma13_gap": 61.229 / 57.680 - 1.0,
+            "ma13_ma40_gap": 57.680 / 53.125 - 1.0,
+        })
+        self.assertIsNone(setup)
+
     def test_entry_structure_score_prefers_smooth_lower_position(self):
         smooth = {
             "distance_ma40": 0.12, "distance_ma13": 0.03,
@@ -559,14 +585,16 @@ class RiskAndSizingTests(unittest.TestCase):
 
     def test_new_entry_execution_price_must_remain_near_ma7(self):
         candidate = {"feature": {
-            "entry_setup": "trend", "close": 103.0, "ma7": 100.0,
+            "entry_setup": "trend", "close": 103.0,
+            "ma7": 100.0, "ma40": 92.0,
         }}
         self.assertTrue(invoke("buy_entry_price_allowed", 103.5, candidate))
         self.assertFalse(invoke("buy_entry_price_allowed", 105.0, candidate))
 
     def test_starter_allows_wider_ma7_distance_but_rejects_large_gap(self):
         candidate = {"feature": {
-            "entry_setup": "ma40_starter", "close": 106.0, "ma7": 100.0,
+            "entry_setup": "ma40_starter", "close": 106.0,
+            "ma7": 100.0, "ma40": 94.0,
         }}
         self.assertTrue(invoke("buy_entry_price_allowed", 107.0, candidate))
         self.assertFalse(invoke("buy_entry_price_allowed", 109.5, candidate))

@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.7.0_20260807_SECTOR_DRIVEN_EXPOSURE
+# DOWNLOAD_BUILD: V1.7.1_20260807_TREND_ENTRY_ROLLOVER_GUARD
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_7_0"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_7_1"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -23,9 +23,10 @@ STYLE_STRONG_EXPOSURE = 0.25
 STYLE_WATCH_EXPOSURE = 0.10
 MAX_TOTAL_EXPOSURE = 0.80
 INTRADAY_REDUCE_RATIO = 1.0 / 3.0
-ENTRY_MAX_DISTANCE_MA40 = 0.25
+ENTRY_MAX_DISTANCE_MA40 = 0.15
 ENTRY_MAX_DISTANCE_MA7 = 0.04
 ENTRY_MAX_MA7_MA13_GAP = 0.035
+ENTRY_ABSOLUTE_MAX_MA7_MA13_GAP = 0.05
 ENTRY_MAX_GAP_RATIO = 1.25
 ENTRY_MAX_EXECUTION_GAP = 0.03
 ENTRY_MIN_MA7_SLOPE_3D = 0.003
@@ -409,13 +410,17 @@ def entry_setup_kind(metrics):
     distance7 = close / ma7 - 1.0 if ma7 > 0.0 else float("inf")
     gap7 = float(metrics["ma7_ma13_gap"])
     gap13 = float(metrics["ma13_ma40_gap"])
+    ma7_prev1 = float(metrics.get("ma7_prev1", ma7 - 1e-12))
+    ma7_prev2 = float(metrics.get("ma7_prev2", ma7_prev1 - 1e-12))
     trend_entry = bool(
         close > ma7 > ma13 > ma40
         and ma13 > ma13_prev and ma40 > ma40_prev
+        and ma7 > ma7_prev1 >= ma7_prev2
         and slope7 >= ENTRY_MIN_MA7_SLOPE_3D
         and slope13 >= ENTRY_MIN_MA13_SLOPE_3D
         and distance7 <= ENTRY_MAX_DISTANCE_MA7
         and distance40 <= ENTRY_MAX_DISTANCE_MA40
+        and gap7 <= ENTRY_ABSOLUTE_MAX_MA7_MA13_GAP
         and gap7 <= max(
             ENTRY_MAX_MA7_MA13_GAP,
             ENTRY_MAX_GAP_RATIO * gap13
@@ -475,6 +480,8 @@ def stock_feature(frame, sector_return13, sector_return40,
         return None
 
     ma7 = float(np.mean(close[-7:]))
+    ma7_prev1 = float(np.mean(close[-8:-1]))
+    ma7_prev2 = float(np.mean(close[-9:-2]))
     ma13 = float(np.mean(close[-13:]))
     ma40 = float(np.mean(close[-40:]))
     ma7_prev3 = float(np.mean(close[-10:-3]))
@@ -501,7 +508,9 @@ def stock_feature(frame, sector_return13, sector_return40,
     entry_setup = entry_setup_kind({
         "close": close[-1], "low": latest_low,
         "previous_high": previous_high,
-        "ma7": ma7, "ma13": ma13, "ma40": ma40,
+        "ma7": ma7, "ma7_prev1": ma7_prev1,
+        "ma7_prev2": ma7_prev2,
+        "ma13": ma13, "ma40": ma40,
         "ma13_prev": ma13_prev, "ma40_prev": ma40_prev,
         "ma7_slope3": ma7_slope3, "ma13_slope3": ma13_slope3,
         "distance_ma40": distance_ma40,
@@ -528,6 +537,8 @@ def stock_feature(frame, sector_return13, sector_return40,
     return {
         "close": float(close[-1]),
         "ma7": ma7,
+        "ma7_prev1": ma7_prev1,
+        "ma7_prev2": ma7_prev2,
         "ma13": ma13,
         "ma40": ma40,
         "r13": r13,
@@ -1538,8 +1549,10 @@ def buy_entry_price_allowed(price, candidate):
     feature = (candidate or {}).get("feature", {})
     ma7 = float(feature.get("ma7", 0.0))
     signal_close = float(feature.get("close", 0.0))
+    ma40 = float(feature.get("ma40", 0.0))
     setup = str(feature.get("entry_setup", ""))
-    if price <= 0.0 or ma7 <= 0.0 or signal_close <= 0.0:
+    if (price <= 0.0 or ma7 <= 0.0 or ma40 <= 0.0
+            or signal_close <= 0.0):
         return False
     max_distance = (
         STARTER_MAX_DISTANCE_MA7
@@ -1548,6 +1561,7 @@ def buy_entry_price_allowed(price, candidate):
     )
     return bool(
         price <= ma7 * (1.0 + max_distance)
+        and price <= ma40 * (1.0 + ENTRY_MAX_DISTANCE_MA40)
         and price <= signal_close * (1.0 + ENTRY_MAX_EXECUTION_GAP)
     )
 
@@ -1683,6 +1697,9 @@ def _rebalance_to_desired(context, snapshot, trade_date):
                 "ma7", round(float((candidate or {}).get(
                     "feature", {}
                 ).get("ma7", 0.0)), 4),
+                "ma40", round(float((candidate or {}).get(
+                    "feature", {}
+                ).get("ma40", 0.0)), 4),
             )
             continue
         affordable = int(cash * 0.98 / price / 100) * 100
