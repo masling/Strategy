@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.6.3_20260806_ORDER_DEAL_STATUS
+# DOWNLOAD_BUILD: V1.6.4_20260807_ENTRY_PRICE_GUARD
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_6_3"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_6_4"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -24,8 +24,10 @@ STYLE_WATCH_EXPOSURE = 0.10
 MAX_TOTAL_EXPOSURE = 0.80
 INTRADAY_REDUCE_RATIO = 1.0 / 3.0
 ENTRY_MAX_DISTANCE_MA40 = 0.25
+ENTRY_MAX_DISTANCE_MA7 = 0.04
 ENTRY_MAX_MA7_MA13_GAP = 0.035
 ENTRY_MAX_GAP_RATIO = 1.25
+ENTRY_MAX_EXECUTION_GAP = 0.03
 ENTRY_MIN_MA7_SLOPE_3D = 0.003
 ENTRY_MIN_MA13_SLOPE_3D = 0.0015
 ADDBACK_WINDOW_DAYS = 3
@@ -38,6 +40,7 @@ ADDBACK_MIN_DISTANCE_MA13 = 0.08
 STARTER_POSITION_SCALE = 0.5
 STARTER_MAX_MA7_MA13_GAP = 0.02
 STARTER_MAX_DISTANCE_MA40 = 0.15
+STARTER_MAX_DISTANCE_MA7 = 0.08
 STARTER_SUPPORT_TOLERANCE = 0.02
 STARTER_MIN_MA13_SLOPE_3D = -0.008
 TREND_ADD_WINDOW_DAYS = 15
@@ -370,6 +373,7 @@ def entry_setup_kind(metrics):
     slope7 = float(metrics["ma7_slope3"])
     slope13 = float(metrics["ma13_slope3"])
     distance40 = float(metrics["distance_ma40"])
+    distance7 = close / ma7 - 1.0 if ma7 > 0.0 else float("inf")
     gap7 = float(metrics["ma7_ma13_gap"])
     gap13 = float(metrics["ma13_ma40_gap"])
     trend_entry = bool(
@@ -377,6 +381,7 @@ def entry_setup_kind(metrics):
         and ma13 > ma13_prev and ma40 > ma40_prev
         and slope7 >= ENTRY_MIN_MA7_SLOPE_3D
         and slope13 >= ENTRY_MIN_MA13_SLOPE_3D
+        and distance7 <= ENTRY_MAX_DISTANCE_MA7
         and distance40 <= ENTRY_MAX_DISTANCE_MA40
         and gap7 <= max(
             ENTRY_MAX_MA7_MA13_GAP,
@@ -393,6 +398,7 @@ def entry_setup_kind(metrics):
         and slope7 >= -0.02
         and abs(low / ma40 - 1.0) <= STARTER_SUPPORT_TOLERANCE
         and close > previous_high
+        and distance7 <= STARTER_MAX_DISTANCE_MA7
         and distance40 <= STARTER_MAX_DISTANCE_MA40
     )
     if ma40_starter:
@@ -405,6 +411,7 @@ def entry_setup_kind(metrics):
         and min(abs(low / ma7 - 1.0), abs(low / ma13 - 1.0))
         <= BASE_RECLAIM_SUPPORT_TOLERANCE
         and close > previous_high
+        and distance7 <= STARTER_MAX_DISTANCE_MA7
         and distance40 <= BASE_RECLAIM_MAX_DISTANCE_MA40
         and gap7 <= max(
             ENTRY_MAX_MA7_MA13_GAP,
@@ -446,6 +453,7 @@ def stock_feature(frame, sector_return13, sector_return40,
     r13 = _return(close, 13)
     r40 = _return(close, 40)
     distance_ma13 = close[-1] / ma13 - 1.0
+    distance_ma7 = close[-1] / ma7 - 1.0
     distance_ma40 = close[-1] / ma40 - 1.0
     ma7_ma13_gap = ma7 / ma13 - 1.0
     ma13_ma40_gap = ma13 / ma40 - 1.0
@@ -494,6 +502,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "rs13": rs13,
         "rs40": rs40,
         "distance_ma13": distance_ma13,
+        "distance_ma7": distance_ma7,
         "distance_ma40": distance_ma40,
         "ma7_ma13_gap": ma7_ma13_gap,
         "ma13_ma40_gap": ma13_ma40_gap,
@@ -1492,6 +1501,24 @@ def _buy_is_tradeable(code, tick):
     return price / previous < limit_ratio - 0.002
 
 
+def buy_entry_price_allowed(price, candidate):
+    feature = (candidate or {}).get("feature", {})
+    ma7 = float(feature.get("ma7", 0.0))
+    signal_close = float(feature.get("close", 0.0))
+    setup = str(feature.get("entry_setup", ""))
+    if price <= 0.0 or ma7 <= 0.0 or signal_close <= 0.0:
+        return False
+    max_distance = (
+        STARTER_MAX_DISTANCE_MA7
+        if setup in ("ma40_starter", "base_reclaim")
+        else ENTRY_MAX_DISTANCE_MA7
+    )
+    return bool(
+        price <= ma7 * (1.0 + max_distance)
+        and price <= signal_close * (1.0 + ENTRY_MAX_EXECUTION_GAP)
+    )
+
+
 def _desired_share_map(snapshot, style_exposures, candidates, tick_map,
                        execution_prices=None):
     desired = {}
@@ -1612,6 +1639,18 @@ def _rebalance_to_desired(context, snapshot, trade_date):
         )
         if price <= 0 or not _buy_is_tradeable(code, tick_map.get(code, {})):
             retry = True
+            continue
+        candidate = candidate_map.get(code)
+        if current <= 0 and not buy_entry_price_allowed(price, candidate):
+            A.desired_shares[code] = 0
+            A.blocked_codes.add(code)
+            print(
+                "SKIP_BUY", trade_date, code, "entry_price_too_far",
+                "price", round(price, 4),
+                "ma7", round(float((candidate or {}).get(
+                    "feature", {}
+                ).get("ma7", 0.0)), 4),
+            )
             continue
         affordable = int(cash * 0.98 / price / 100) * 100
         order_volume = min(volume, affordable)

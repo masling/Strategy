@@ -253,6 +253,18 @@ class StockSelectionTests(unittest.TestCase):
         })
         self.assertIsNone(invoke("stock_feature", frame, 0.01, 0.03))
 
+    def test_trend_entry_rejects_price_more_than_four_percent_above_ma7(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 108.0, "low": 105.0, "previous_high": 107.0,
+            "ma7": 100.0, "ma13": 98.0, "ma40": 92.0,
+            "ma13_prev": 96.0, "ma40_prev": 90.0,
+            "ma7_slope3": 0.02, "ma13_slope3": 0.01,
+            "distance_ma40": 108.0 / 92.0 - 1.0,
+            "ma7_ma13_gap": 100.0 / 98.0 - 1.0,
+            "ma13_ma40_gap": 98.0 / 92.0 - 1.0,
+        })
+        self.assertIsNone(setup)
+
     def test_entry_structure_score_prefers_smooth_lower_position(self):
         smooth = {
             "distance_ma40": 0.12, "distance_ma13": 0.03,
@@ -491,6 +503,20 @@ class RiskAndSizingTests(unittest.TestCase):
             {}, {"A": 10.0},
         )
         self.assertEqual(desired, {"A": 7500})
+
+    def test_new_entry_execution_price_must_remain_near_ma7(self):
+        candidate = {"feature": {
+            "entry_setup": "trend", "close": 103.0, "ma7": 100.0,
+        }}
+        self.assertTrue(invoke("buy_entry_price_allowed", 103.5, candidate))
+        self.assertFalse(invoke("buy_entry_price_allowed", 105.0, candidate))
+
+    def test_starter_allows_wider_ma7_distance_but_rejects_large_gap(self):
+        candidate = {"feature": {
+            "entry_setup": "ma40_starter", "close": 106.0, "ma7": 100.0,
+        }}
+        self.assertTrue(invoke("buy_entry_price_allowed", 107.0, candidate))
+        self.assertFalse(invoke("buy_entry_price_allowed", 109.5, candidate))
 
 
 class IntradayAggregationTests(unittest.TestCase):
