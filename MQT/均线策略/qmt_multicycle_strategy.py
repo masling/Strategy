@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.4.0_20260811_MA_FLOW_ENTRY_FILTER
+# DOWNLOAD_BUILD: V2.4.1_20260811_SECTOR_KLINE_LOG
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_0"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_1"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -501,6 +501,9 @@ def sector_member_name(index_name):
 
 def sector_proxy_frame(history, member_codes, min_members=5):
     return_parts = []
+    open_parts = []
+    high_parts = []
+    low_parts = []
     amount_parts = []
     for code in member_codes or []:
         frame = history.get(code)
@@ -518,6 +521,20 @@ def sector_proxy_frame(history, member_codes, min_members=5):
         daily_return.loc[close.notna() & previous.isna()] = 0.0
         daily_return = daily_return.where(daily_return.abs() <= 0.35)
         return_parts.append(daily_return)
+        for field, parts in (
+                ("open", open_parts), ("high", high_parts),
+                ("low", low_parts)):
+            if field in data.columns:
+                values = pd.Series(
+                    np.asarray(data[field], dtype=float),
+                    index=data.index,
+                    name=code,
+                ).where(lambda item: item > 0.0)
+                ratio = values / previous - 1.0
+                ratio.loc[values.notna() & previous.isna()] = 0.0
+                parts.append(ratio.where(ratio.abs() <= 0.50))
+            else:
+                parts.append(daily_return.copy())
         if "amount" in data.columns:
             amount_parts.append(pd.Series(
                 np.asarray(data["amount"], dtype=float),
@@ -533,6 +550,27 @@ def sector_proxy_frame(history, member_codes, min_members=5):
     average_return = returns.mean(axis=1, skipna=True)
     average_return = average_return.where(valid_count >= required)
     proxy_close = (1.0 + average_return).cumprod() * 100.0
+    proxy_previous = proxy_close.shift(1)
+    if len(proxy_previous) > 0:
+        proxy_previous.iloc[0] = 100.0
+
+    def proxy_price(parts, fallback):
+        if not parts:
+            return fallback.copy()
+        ratios = pd.concat(parts, axis=1).sort_index()
+        valid = ratios.notna().sum(axis=1)
+        average = ratios.mean(axis=1, skipna=True).where(valid >= required)
+        return proxy_previous * (1.0 + average.reindex(proxy_previous.index))
+
+    proxy_open = proxy_price(open_parts, proxy_close)
+    proxy_high = proxy_price(high_parts, proxy_close)
+    proxy_low = proxy_price(low_parts, proxy_close)
+    proxy_high = pd.concat(
+        [proxy_high, proxy_open, proxy_close], axis=1
+    ).max(axis=1)
+    proxy_low = pd.concat(
+        [proxy_low, proxy_open, proxy_close], axis=1
+    ).min(axis=1)
 
     if amount_parts:
         amounts = pd.concat(amount_parts, axis=1).sort_index()
@@ -540,6 +578,9 @@ def sector_proxy_frame(history, member_codes, min_members=5):
     else:
         proxy_amount = pd.Series(1.0, index=proxy_close.index)
     result = pd.DataFrame({
+        "open": proxy_open,
+        "high": proxy_high,
+        "low": proxy_low,
         "close": proxy_close,
         "amount": proxy_amount.reindex(proxy_close.index),
     })
@@ -1749,7 +1790,8 @@ def _sector_selection(context, asof, benchmark, style_members, style_code):
         return []
 
     history = fetch_history(
-        context, ["close", "amount"], all_codes, "1d", 55, asof,
+        context, ["open", "high", "low", "close", "amount"],
+        all_codes, "1d", 55, asof,
         "back_ratio",
     )
     features = {}
@@ -1760,6 +1802,7 @@ def _sector_selection(context, asof, benchmark, style_members, style_code):
             continue
         features[sector_name] = feature
         record["feature"] = feature
+        record["proxy"] = proxy
     if not features:
         print("ERROR SW1 member history is insufficient")
         return []
@@ -3095,10 +3138,38 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
             [(item["style"], item["member_sector"], item["score"])
              for item in sectors],
         )
+        for item in sectors:
+            proxy = item.get("proxy")
+            if proxy is None or len(proxy) <= 0:
+                continue
+            data = proxy.tail(55).copy()
+            timestamps = _datetime_index(data.index)
+            bars = []
+            for timestamp, (_, row) in zip(timestamps, data.iterrows()):
+                if pd.isna(timestamp):
+                    continue
+                values = [
+                    float(row.get(field, np.nan))
+                    for field in ("open", "high", "low", "close")
+                ]
+                if not all(np.isfinite(value) for value in values):
+                    continue
+                bars.append((
+                    timestamp.strftime("%Y%m%d"),
+                    round(values[0], 6), round(values[1], 6),
+                    round(values[2], 6), round(values[3], 6),
+                    round(float(row.get("amount", 0.0)), 2),
+                ))
+            if bars:
+                print(
+                    "SECTOR_K", trade_date, item["style"],
+                    item["member_sector"], bars,
+                )
     if sectors and candidates:
         print(
             "WATCHLIST",
             [(item["style"], item["code"], item.get("name", ""),
+              item.get("sector", ""),
               item["score"], item.get("strength_score", 0.0),
               item.get("strength_fit_score", 0.0),
               item.get("entry_score", 0.0),
@@ -3117,6 +3188,7 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
         print(
             "SPECTATORS",
             [(item["style"], item["code"], item.get("name", ""),
+              item.get("sector", ""),
               item.get("strength_score", 0.0),
               item.get("strength_fit_score", 0.0),
               item.get("entry_score", 0.0),
@@ -3127,6 +3199,7 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
         print(
             "TARGETS",
             [(item["style"], item["code"], item.get("name", ""),
+              item.get("sector", ""),
               item["score"], item.get("strength_score", 0.0),
               item.get("strength_fit_score", 0.0),
               item.get("entry_score", 0.0),

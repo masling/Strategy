@@ -4,12 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>QMT 回测分析器</title>
-  <link rel="stylesheet" href="./styles.css?v=20260811-v202">
+  <link rel="stylesheet" href="./styles.css?v=20260811-v210">
 </head>
 <body>
   <header>
     <div>
-      <span class="eyebrow">QMT STRATEGY LAB · V2.0.2</span>
+      <span class="eyebrow">QMT STRATEGY LAB · V2.1.0</span>
       <h1>回测复盘工作台</h1>
       <p>先核对当日指数、板块和入场候选，再下钻到单股买卖细节。</p>
     </div>
@@ -59,7 +59,7 @@
         <div class="stage-head"><div><div class="section-title"><span>02</span>板块评分与趋势</div><h2 id="sectorChartTitle">选择板块</h2></div><div id="sectorFocus" class="stage-summary empty">当日无唯一主线记录</div></div>
         <div class="stage-grid">
           <div id="sectorCards" class="selection-list empty">暂无板块评分</div>
-          <div class="visual-panel"><div class="chart-shell context-chart"><canvas id="sectorChart" aria-label="板块评分趋势图"></canvas></div><p id="sectorChartNote" class="data-note">板块图展示日志中的历次评分，黄点为当前复盘日。</p></div>
+          <div class="visual-panel"><div class="chart-mode-row"><div class="tabs"><button class="sector-tab active" data-sector-chart="kline" aria-pressed="true">板块K线</button><button class="sector-tab" data-sector-chart="score" aria-pressed="false">评分趋势</button></div></div><div class="chart-shell context-chart"><canvas id="sectorChart" aria-label="板块K线或评分趋势图"></canvas></div><p id="sectorChartNote" class="data-note">板块K线由策略的申万成员等权代理行情生成。</p></div>
         </div>
       </article>
 
@@ -67,6 +67,11 @@
         <div class="stage-head"><div><div class="section-title"><span>03</span>个股观察池与入场评分</div><h2 id="candidateTitle">选择指数后查看候选股</h2></div><div id="candidateLegend" class="legend"></div></div>
         <div class="table-wrap candidate-table"><table><thead><tr><th>代码 / 名称</th><th>所属</th><th>综合</th><th>强度</th><th>匹配</th><th>入场</th><th>状态</th><th>目标 / 当日操作</th></tr></thead><tbody id="candidateRows"></tbody></table></div>
         <p id="candidateNote" class="data-note"></p>
+        <div class="candidate-kline">
+          <div class="chart-head"><div><div class="section-title"><span>03K</span>候选股日K与均线</div><h2 id="candidateChartTitle">选择候选股</h2></div><button id="openStockDetail" type="button" disabled>打开完整操盘详情 →</button></div>
+          <div class="chart-shell candidate-chart"><canvas id="candidateChart" aria-label="候选股日K图"></canvas><div id="candidateChartLoading" class="chart-loading hidden"></div></div>
+          <p id="candidateChartNote" class="data-note">点击上方候选股，在当前复盘页直接查看日K、MA7、MA13和MA40。</p>
+        </div>
       </article>
 
       <section class="summary-grid">
@@ -98,6 +103,6 @@
 
     <section class="diagnostics"><details><summary>解析信息与警告</summary><pre id="diagnosticText"></pre></details></section>
   </main>
-  <script type="module" src="./app.mjs?v=20260811-v202"></script>
+  <script type="module" src="./app.mjs?v=20260811-v210"></script>
 </body>
 </html>

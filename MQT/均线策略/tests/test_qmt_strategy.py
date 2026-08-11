@@ -269,6 +269,9 @@ class SectorRankingTests(unittest.TestCase):
 
         self.assertIsInstance(proxy, pd.DataFrame)
         self.assertEqual(len(proxy), 70)
+        self.assertTrue({"open", "high", "low", "close", "amount"}.issubset(proxy.columns))
+        self.assertTrue((proxy["high"] >= proxy[["open", "close"]].max(axis=1)).all())
+        self.assertTrue((proxy["low"] <= proxy[["open", "close"]].min(axis=1)).all())
         self.assertAlmostEqual(float(proxy["close"].iloc[0]), 100.0)
         self.assertAlmostEqual(
             float(proxy["close"].iloc[-1]),
@@ -285,13 +288,21 @@ class SectorRankingTests(unittest.TestCase):
                 }
                 self.history = {}
                 for code in self.members["SW1汽车"]:
+                    close = 100.0 * np.power(1.005, np.arange(70))
                     self.history[code] = pd.DataFrame({
-                        "close": 100.0 * np.power(1.005, np.arange(70)),
+                        "open": close * 0.998,
+                        "high": close * 1.006,
+                        "low": close * 0.994,
+                        "close": close,
                         "amount": np.repeat(100000000.0, 70),
                     })
                 for code in self.members["SW1银行"]:
+                    close = 100.0 * np.power(0.998, np.arange(70))
                     self.history[code] = pd.DataFrame({
-                        "close": 100.0 * np.power(0.998, np.arange(70)),
+                        "open": close * 1.002,
+                        "high": close * 1.006,
+                        "low": close * 0.994,
+                        "close": close,
                         "amount": np.repeat(100000000.0, 70),
                     })
 

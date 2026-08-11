@@ -75,6 +75,13 @@ function sectorRows(text) {
   })).filter(item => item.style && item.code && Number.isFinite(item.score));
 }
 
+function sectorKRows(text) {
+  return tupleRows(text).map(row => ({
+    time: String(row[0] || ''), open: Number(row[1]), high: Number(row[2]), low: Number(row[3]),
+    close: Number(row[4]), volume: 0, amount: Number(row[5] || 0),
+  })).filter(row => row.time && [row.open, row.high, row.low, row.close].every(Number.isFinite));
+}
+
 function candidateRows(text, kind = 'watchlist') {
   return tupleRows(text).map(row => {
     const style = String(row[0] || ''), code = String(row[1] || ''), name = String(row[2] || '');
@@ -115,7 +122,8 @@ function numberAfter(line, label) {
 
 function emptyDay(date) {
   return {
-    date, state: null, sectors: [], sectorsLogged: false, watchlist: [], watchlistLogged: false,
+    date, state: null, sectors: [], sectorsLogged: false, sectorK: [], sectorKLogged: false,
+    watchlist: [], watchlistLogged: false,
     spectators: [], spectatorsLogged: false, targets: [], targetsLogged: false, entryReady: { added: [], removed: [] },
     sectorFocus: null, transitions: [], portfolio: null, desired: {}, desiredLogged: false,
     allocation: null, orders: [], deals: [], intraday: [],
@@ -281,6 +289,12 @@ export function parseQmtLog(raw) {
       };
     } else if (line.startsWith('SECTORS ')) {
       const day = dayFor(); if (day) { day.sectors = sectorRows(line); day.sectorsLogged = true; }
+    } else if (line.startsWith('SECTOR_K ')) {
+      const match = line.match(/^SECTOR_K\s+(\d{8})\s+(\S+)\s+(\S+)\s+/); const day = match && dayFor(match[1]);
+      if (day) {
+        day.sectorK.push({ style: match[2], code: match[3], rows: sectorKRows(line.slice(match[0].length)) });
+        day.sectorKLogged = true;
+      }
     } else if (line.startsWith('WATCHLIST ')) {
       const day = dayFor(); if (day) { day.watchlist = candidateRows(line, 'watchlist'); day.watchlistLogged = true; }
     } else if (line.startsWith('SPECTATORS ')) {
@@ -361,13 +375,15 @@ export function parseQmtLog(raw) {
   }
   if (pendingPortfolio && currentDate) days.get(currentDate).portfolio = pendingPortfolio;
   const sortedDays = [...days.values()].sort((a, b) => a.date.localeCompare(b.date));
-  let carriedDesired = {}, carriedSectors = [], carriedWatchlist = [], carriedSpectators = [];
+  let carriedDesired = {}, carriedSectors = [], carriedSectorK = [], carriedWatchlist = [], carriedSpectators = [];
   sortedDays.forEach(day => {
     if (day.desiredLogged) carriedDesired = { ...day.desired };
     else day.desired = { ...carriedDesired };
     const active = (day.state?.exposure || 0) > 0;
     if (day.sectorsLogged) carriedSectors = day.sectors.map(item => ({ ...item }));
     else day.sectors = active ? carriedSectors.map(item => ({ ...item, carried: true })) : [];
+    if (day.sectorKLogged) carriedSectorK = day.sectorK.map(item => ({ ...item, rows: item.rows.map(row => ({ ...row })) }));
+    else day.sectorK = active ? carriedSectorK.map(item => ({ ...item, carried: true, rows: item.rows.map(row => ({ ...row })) })) : [];
     if (day.watchlistLogged) carriedWatchlist = day.watchlist.map(item => ({ ...item }));
     else if ((day.state?.watchlist || 0) > 0) day.watchlist = carriedWatchlist.map(item => ({ ...item, carried: true }));
     else day.watchlist = [];

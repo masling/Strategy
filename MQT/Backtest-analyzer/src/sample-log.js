@@ -1,12 +1,27 @@
+const sectorBars = (() => {
+  const bars = [], date = new Date('2025-05-26T00:00:00Z');
+  for (let day = 0; bars.length < 55; day += 1) {
+    date.setUTCDate(date.getUTCDate() + (day ? 1 : 0));
+    if (date.getUTCDay() === 0 || date.getUTCDay() === 6) continue;
+    const index = bars.length, previous = 100 + index * 0.24 + Math.sin(index / 3) * 1.1;
+    const close = previous + Math.sin(index * 0.8) * 0.55;
+    const open = previous - Math.cos(index * 0.6) * 0.25;
+    const stamp = date.toISOString().slice(0, 10).replaceAll('-', '');
+    bars.push(`('${stamp}', ${open.toFixed(3)}, ${(Math.max(open, close) + 0.7).toFixed(3)}, ${(Math.min(open, close) - 0.7).toFixed(3)}, ${close.toFixed(3)}, ${Math.round(8.2e9 + index * 4.5e7)})`);
+  }
+  return `[${bars.join(', ')}]`;
+})();
+
 export const sampleLog = `start back test mode
-INIT QMT_MC_ROTATION_V2_3_0 BACKTEST testS STOCK
+INIT QMT_MC_ROTATION_V2_4_1 BACKTEST testS STOCK
 ENGINE period 5m start 20250801 end 20250811
 FIRST_BAR 2025-08-01 09:35:00
 PORTFOLIO source virtual_account capital 1000000 balance 1000000 cash 1000000 positions 0
 STATE 20250801 exposure 0.3 style_exposures {'000905.SH': 0.3} scores {'000300.SH': 62.0, '000905.SH': 72.0, '000852.SH': 58.0, '399006.SZ': 55.0} regimes {'000300.SH': 'OFF', '000905.SH': 'WATCH', '000852.SH': 'OFF', '399006.SZ': 'OFF'} risk_caps {'000905.SH': 0.3} reserve 12 watchlist 5 spectators 2 entry_ready 0
 SECTORS [('000905.SH', 'SW1电子', 76.0), ('000905.SH', 'SW1通信', 64.0), ('000905.SH', 'SW1基础化工', 52.0)]
-WATCHLIST [('000905.SH', '600183.SH', '生益科技', 69.2, 74.0, 66.5, 62.0, 'WAIT'), ('000905.SH', '002463.SZ', '沪电股份', 65.0, 84.0, 48.0, 55.0, 'OVEREXTENDED')]
-SPECTATORS [('000905.SH', '300476.SZ', '胜宏科技', 92.0, 35.0, 41.0, 'OVEREXTENDED')]
+SECTOR_K 20250801 000905.SH SW1电子 ${sectorBars}
+WATCHLIST [('000905.SH', '600183.SH', '生益科技', 'SW1电子', 69.2, 74.0, 66.5, 62.0, 'WAIT'), ('000905.SH', '002463.SZ', '沪电股份', 'SW1电子', 65.0, 84.0, 48.0, 55.0, 'OVEREXTENDED')]
+SPECTATORS [('000905.SH', '300476.SZ', '胜宏科技', 'SW1电子', 92.0, 35.0, 41.0, 'OVEREXTENDED')]
 PORTFOLIO source virtual_account capital 1000000 balance 1000000 cash 1000000 positions 0
 STATE 20250804 exposure 0.3 style_exposures {'000905.SH': 0.3} scores {'000300.SH': 64.0, '000905.SH': 74.0, '000852.SH': 61.0, '399006.SZ': 58.0} regimes {'000300.SH': 'OFF', '000905.SH': 'WATCH', '000852.SH': 'OFF', '399006.SZ': 'OFF'} risk_caps {'000905.SH': 0.3} reserve 12 watchlist 5 spectators 2 entry_ready 1
 ENTRY_READY 20250804 added [('600183.SH', 'trend', 72.1, 78.2, 69.5, 73.4)] removed []
@@ -18,7 +33,8 @@ PORTFOLIO source virtual_account capital 1000000 balance 1008200 cash 899650 pos
 SECTOR_FOCUS 20250811 SW1电子 style 000905.SH leader 79.0 runner 57.0 base_exposure 0.6
 STATE 20250811 exposure 0.6 style_exposures {'000905.SH': 0.6} scores {'000300.SH': 65.0, '000905.SH': 79.0, '000852.SH': 63.0, '399006.SZ': 60.0} regimes {'000300.SH': 'WATCH', '000905.SH': 'STRONG', '000852.SH': 'OFF', '399006.SZ': 'OFF'} risk_caps {'000905.SH': 0.6} reserve 16 watchlist 6 spectators 3 entry_ready 1
 SECTORS [('000905.SH', 'SW1电子', 84.0), ('000905.SH', 'SW1通信', 67.0), ('000905.SH', 'SW1基础化工', 55.0)]
-WATCHLIST [('000905.SH', '600183.SH', '生益科技', 74.0, 80.0, 70.0, 75.0, 'HELD'), ('000905.SH', '002463.SZ', '沪电股份', 68.0, 82.0, 52.0, 58.0, 'OVEREXTENDED')]
-TARGETS [('000905.SH', '600183.SH', '生益科技', 74.0, 80.0, 70.0, 75.0, 'trend')]
+SECTOR_K 20250811 000905.SH SW1电子 ${sectorBars}
+WATCHLIST [('000905.SH', '600183.SH', '生益科技', 'SW1电子', 74.0, 80.0, 70.0, 75.0, 'HELD'), ('000905.SH', '002463.SZ', '沪电股份', 'SW1电子', 68.0, 82.0, 52.0, 58.0, 'OVEREXTENDED')]
+TARGETS [('000905.SH', '600183.SH', '生益科技', 'SW1电子', 74.0, 80.0, 70.0, 75.0, 'trend')]
 ORDER_SUBMITTED 20250811 140000 sell 600183.SH 800 price 43.20 intraday_top
 DEAL 20250811 140001 sell 600183.SH 800 price 43.18`;

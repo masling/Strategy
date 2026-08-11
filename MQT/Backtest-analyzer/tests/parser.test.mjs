@@ -183,6 +183,16 @@ WATCHLIST [('000905.SH', '600183.SH', '生益科技', 'SW1电子', 72, 78, 69, 7
   assert.equal(result.days[0].watchlist[0].score, 72);
 });
 
+test('parses and carries strategy-generated sector proxy K lines', () => {
+  const result = parseQmtLog(`STATE 20260810 exposure 0.3 style_exposures {} scores {}
+SECTORS [('000905.SH', 'SW1电子', 80)]
+SECTOR_K 20260810 000905.SH SW1电子 [('20260807', 100.0, 102.0, 99.0, 101.0, 1000000.0), ('20260810', 101.0, 104.0, 100.5, 103.0, 1200000.0)]
+STATE 20260811 exposure 0.3 style_exposures {} scores {}`);
+  assert.equal(result.days[0].sectorK[0].rows[1].close, 103);
+  assert.equal(result.days[1].sectorK[0].carried, true);
+  assert.equal(result.days[1].sectorK[0].rows.length, 2);
+});
+
 test('merges V2.3 queued and submitted orders and preserves cancelled orders', () => {
   const result = parseQmtLog(`ORDER_QUEUED 20250811 093500 buy 002222.SZ 3700 reference_price 40.27 rebalance
 ORDER_SUBMITTED 20250811 094000 buy 002222.SZ 3700 price 40.28 rebalance signal_time 093500 slippage_bps 10.0

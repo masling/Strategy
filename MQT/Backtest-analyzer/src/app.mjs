@@ -1,4 +1,4 @@
-import { parseQmtLog } from './parser.mjs?v=20260811-v200';
+import { parseQmtLog } from './parser.mjs?v=20260811-v210';
 import { fetchDaily, fetchThirtyMinute } from './market-data.mjs';
 import { drawCandles, drawScoreSeries } from './chart.mjs';
 import { sampleLog } from './sample-log.js';
@@ -7,6 +7,7 @@ const $ = selector => document.querySelector(selector);
 const state = {
   report: null, day: null, indexCode: '', sectorCode: '', stock: null, chartType: 'daily',
   cache: new Map(), chartRows: [], chartTrades: [], chartRequest: 0, indexRequest: 0,
+  sectorChartType: 'kline', candidateStock: null, candidateRequest: 0,
   chartView: { bars: { daily: 80, '30m': 160 }, offset: { daily: 0, '30m': 0 } },
 };
 const styles = { large: '大盘', mid: '中盘', small: '小盘', growth: '成长' };
@@ -135,13 +136,34 @@ function renderSectorStage() {
 
 function renderSectorChart() {
   const code = state.sectorCode, style = state.indexCode;
-  $('#sectorChartTitle').textContent = code ? `${code.replace(/^SW1_?/, '')} · 评分历史` : '选择板块';
-  const rows = !code ? [] : state.report.days.flatMap(day => {
+  const scoreRows = !code ? [] : state.report.days.flatMap(day => {
     const item = day.sectors.find(sector => sector.style === style && sector.code === code);
     return item ? [{ time: displayDate(day.date), value: item.score }] : [];
   });
-  drawScoreSeries($('#sectorChart'), rows, state.day?.date);
-  $('#sectorChartNote').textContent = rows.length ? `板块评分由策略日志还原，共 ${rows.length} 个交易日；非调仓日延用上次选择结果。` : '日志中没有该板块的评分历史。';
+  if (!code) {
+    $('#sectorChartTitle').textContent = '选择板块';
+    drawCandles($('#sectorChart'), [], []);
+    $('#sectorChartNote').textContent = '当日没有可显示的板块。';
+    return;
+  }
+  if (state.sectorChartType === 'score') {
+    $('#sectorChartTitle').textContent = `${code.replace(/^SW1_?/, '')} · 评分历史`;
+    drawScoreSeries($('#sectorChart'), scoreRows, state.day?.date);
+    $('#sectorChartNote').textContent = scoreRows.length ? `板块评分由策略日志还原，共 ${scoreRows.length} 个交易日；非调仓日延用上次选择结果。` : '日志中没有该板块的评分历史。';
+    return;
+  }
+  const snapshot = state.day?.sectorK?.find(item => item.style === style && item.code === code);
+  const end = String(state.day?.date || '').replace(/\D/g, '');
+  const rows = (snapshot?.rows || []).filter(row => String(row.time).replace(/\D/g, '').slice(0, 8) <= end);
+  if (rows.length) {
+    $('#sectorChartTitle').textContent = `${code.replace(/^SW1_?/, '')} · 板块代理日K`;
+    drawCandles($('#sectorChart'), rows.slice(-90), [], rows);
+    $('#sectorChartNote').textContent = `策略申万成员等权代理K线 · ${rows[0].time} — ${rows.at(-1).time} · MA7 / MA13 / MA40，与板块评分使用同一份QMT行情。`;
+  } else {
+    $('#sectorChartTitle').textContent = `${code.replace(/^SW1_?/, '')} · 评分历史`;
+    drawScoreSeries($('#sectorChart'), scoreRows, state.day?.date);
+    $('#sectorChartNote').textContent = '当前日志没有 SECTOR_K，已回退显示评分趋势。同步 V2.4.1 策略并重新回测后可显示板块K线。';
+  }
 }
 
 function dailyCandidates(day) {
@@ -161,20 +183,58 @@ function renderCandidates() {
   const hasSectorLink = items.some(item => item.sector);
   if (hasSectorLink && state.sectorCode) items = items.filter(item => item.sector === state.sectorCode);
   items.sort((a, b) => (Number(b.entry) || -1) - (Number(a.entry) || -1));
+  if (!items.some(item => item.code === state.candidateStock?.code)) state.candidateStock = items[0] || null;
   const records = state.day.deals.length ? state.day.deals : state.day.orders.filter(order => order.status !== 'failed');
   $('#candidateRows').innerHTML = items.length ? items.map(item => {
     const actions = records.filter(record => record.code === item.code);
     const bought = actions.filter(record => record.side === 'buy').reduce((sum, record) => sum + record.volume, 0);
     const sold = actions.filter(record => record.side === 'sell').reduce((sum, record) => sum + record.volume, 0);
     const actionText = [bought ? `买 ${money(bought)}` : '', sold ? `卖 ${money(sold)}` : ''].filter(Boolean).join(' / ') || '当日无操作';
-    return `<tr data-stock-code="${html(item.code)}" class="${item.code === state.stock?.code ? 'selected' : ''}"><td><button class="candidate-link">${html(item.code)}</button><br><small>${html(item.name || '—')}</small></td><td>${html(item.sector ? item.sector.replace(/^SW1_?/, '') : indexes[item.style] || item.style || '—')}</td><td class="score">${scoreText(item.score)}</td><td>${scoreText(item.strength)}</td><td>${scoreText(item.strengthFit)}</td><td class="score">${scoreText(item.entry)}</td><td>${statusPill(item.status)}${item.setup ? `<br><small>${html(setups[item.setup] || item.setup)}</small>` : ''}</td><td>${money(state.day.desired[item.code])}<br><small>${actionText}</small></td></tr>`;
+    return `<tr data-stock-code="${html(item.code)}" class="${item.code === state.candidateStock?.code ? 'selected' : ''}"><td><button class="candidate-link">${html(item.code)}</button><br><small>${html(item.name || '—')}</small></td><td>${html(item.sector ? item.sector.replace(/^SW1_?/, '') : indexes[item.style] || item.style || '—')}</td><td class="score">${scoreText(item.score)}</td><td>${scoreText(item.strength)}</td><td>${scoreText(item.strengthFit)}</td><td class="score">${scoreText(item.entry)}</td><td>${statusPill(item.status)}${item.setup ? `<br><small>${html(setups[item.setup] || item.setup)}</small>` : ''}</td><td>${money(state.day.desired[item.code])}<br><small>${actionText}</small></td></tr>`;
   }).join('') : '<tr><td colspan="8" class="empty">当日无对应个股记录</td></tr>';
   $('#candidateTitle').textContent = `${indexes[state.indexCode] || state.indexCode || '未选指数'}${state.sectorCode ? ` · ${state.sectorCode.replace(/^SW1_?/, '')}` : ''}`;
   $('#candidateLegend').innerHTML = '<span class="tag ready">可入场</span><span class="tag watch">等待</span><span class="tag overextended">过热</span>';
   $('#candidateNote').textContent = hasSectorLink ? '个股已按日志中的板块归属精确过滤。' : '当前日志未记录个股的板块归属，因此展示该指数下的全部观察股，不做错误的板块映射。';
   document.querySelectorAll('[data-stock-code]').forEach(row => row.addEventListener('click', () => {
-    const candidate = items.find(item => item.code === row.dataset.stockCode); setWorkspace('stock'); selectStock(candidate);
+    state.candidateStock = items.find(item => item.code === row.dataset.stockCode) || null;
+    renderCandidates();
   }));
+  $('#openStockDetail').disabled = !state.candidateStock;
+  renderCandidateChart();
+}
+
+async function renderCandidateChart() {
+  const candidate = state.candidateStock, date = state.day?.date;
+  if (!candidate || !date) {
+    $('#candidateChartTitle').textContent = '选择候选股';
+    $('#candidateChartNote').textContent = '当日没有可显示的候选股。';
+    $('#candidateChartLoading').classList.add('hidden');
+    drawCandles($('#candidateChart'), [], []);
+    return;
+  }
+  const code = candidate.code, request = ++state.candidateRequest;
+  $('#candidateChartTitle').textContent = `${code} ${candidate.name || ''}`;
+  $('#candidateChartLoading').classList.remove('hidden');
+  $('#candidateChartLoading').textContent = '正在获取候选股日K…';
+  try {
+    const key = `daily:${code}:${date}:${date}`;
+    let rows = state.cache.get(key);
+    if (!rows) { rows = await fetchDaily(code, date, date); state.cache.set(key, rows); }
+    if (request !== state.candidateRequest || state.candidateStock?.code !== code || state.day?.date !== date) return;
+    const end = String(date).replace(/\D/g, '');
+    rows = rows.filter(row => String(row.time).replace(/\D/g, '').slice(0, 8) <= end);
+    const trades = stockTrading(code)?.trades || [];
+    drawCandles($('#candidateChart'), rows.slice(-90), trades, rows);
+    $('#candidateChartNote').textContent = rows.length
+      ? `日K · ${rows[0].time} — ${rows.at(-1).time} · MA7 / MA13 / MA40 · 入场评分 ${scoreText(candidate.entry)}，截止当前复盘日。`
+      : '腾讯财经未返回该股在当前复盘日之前的日K。';
+    $('#candidateChartLoading').classList.add('hidden');
+  } catch (error) {
+    if (request !== state.candidateRequest) return;
+    drawCandles($('#candidateChart'), [], []);
+    $('#candidateChartNote').textContent = `${error.message}，候选股评分仍可正常查看。`;
+    $('#candidateChartLoading').classList.add('hidden');
+  }
 }
 
 function stockTrading(code) { return state.report?.stocks?.find(stock => stock.code === code) || null; }
@@ -210,7 +270,7 @@ async function selectStock(stock) {
   if ([...$('#chartStockSelect').options].some(option => option.value === state.stock.code)) $('#chartStockSelect').value = state.stock.code;
   const trades = trading?.trades || [], sourceLabel = trading?.tradeSource === 'deal' ? '成交' : '有效委托';
   $('#tradeChips').innerHTML = trades.length ? `<span class="chip buy">${sourceLabel}买入 ${trading.buyCount}笔 · ${money(trading.buyVolume)}股</span><span class="chip sell">${sourceLabel}卖出 ${trading.sellCount}笔 · ${money(trading.sellVolume)}股</span>${trading.failedCount ? `<span class="chip failed">明确失败 ${trading.failedCount}笔</span>` : ''}<span class="trade-range">${displayDate(trades[0].date)} — ${displayDate(trades.at(-1).date)}</span>` : `<span class="empty">该股没有有效买卖记录${trading?.failedCount ? `，明确失败 ${trading.failedCount}笔` : ''}</span>`;
-  renderTradeLedger(trading); renderCandidates(); await renderChart(trades);
+  renderTradeLedger(trading); await renderChart(trades);
 }
 
 async function renderChart(trades = []) {
@@ -278,11 +338,11 @@ function stepDay(offset) {
 function diagnostic() {
   const meta = state.report.meta;
   const legacyLinks = state.report.days.some(day => day.watchlist.some(item => !item.sector));
-  $('#diagnosticText').textContent = [`Web版本：V2.0.2 (2026-08-11)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
+  $('#diagnosticText').textContent = [`Web版本：V2.1.0 (2026-08-11)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
 }
 
 function parse() {
-  state.report = parseQmtLog($('#logInput').value); state.cache.clear(); state.indexCode = ''; state.sectorCode = ''; state.stock = null;
+  state.report = parseQmtLog($('#logInput').value); state.cache.clear(); state.indexCode = ''; state.sectorCode = ''; state.stock = null; state.candidateStock = null;
   const count = state.report.days.length;
   $('#sourceStatus').textContent = count ? `已解析 ${count} 个交易日 · ${state.report.meta.startTime || '未知'} 至 ${state.report.meta.endTime || '未知'}` : '未识别到策略日志';
   $('#dateSelect').innerHTML = state.report.days.map(day => `<option value="${html(day.date)}">${displayDate(day.date)}</option>`).join('');
@@ -313,6 +373,14 @@ $('#previousDay').addEventListener('click', () => stepDay(-1));
 $('#nextDay').addEventListener('click', () => stepDay(1));
 $('#chartStockSelect').addEventListener('change', event => { const stock = stockTrading(event.target.value); if (stock) selectStock(stock); });
 document.querySelectorAll('.workspace-tab').forEach(tab => tab.addEventListener('click', () => setWorkspace(tab.dataset.workspace)));
+document.querySelectorAll('.sector-tab').forEach(tab => tab.addEventListener('click', () => {
+  document.querySelectorAll('.sector-tab').forEach(item => { const active = item === tab; item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active)); });
+  state.sectorChartType = tab.dataset.sectorChart; renderSectorChart();
+}));
+$('#openStockDetail').addEventListener('click', () => {
+  if (!state.candidateStock) return;
+  setWorkspace('stock'); selectStock(state.candidateStock);
+});
 document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(item => { const active = item === tab; item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active)); });
   state.chartType = tab.dataset.chart; selectStock(state.stock);
