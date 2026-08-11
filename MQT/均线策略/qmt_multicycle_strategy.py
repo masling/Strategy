@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.0.0_20260811_WATCHLIST_ENTRY_SEPARATION
+# DOWNLOAD_BUILD: V2.0.1_20260811_DAILY_ENTRY_SCORE_FLOOR
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_0_0"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_0_1"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -37,6 +37,7 @@ INTRADAY_REDUCE_MIN_PROFIT = 0.03
 WATCHLIST_MAX_DISTANCE_MA40 = 0.25
 WATCHLIST_MIN_MA13_SLOPE_3D = -0.003
 WATCHLIST_MIN_HIGH_PROXIMITY = 0.80
+ENTRY_MIN_SCORE = 60.0
 ENTRY_MAX_DISTANCE_MA40 = 0.15
 ENTRY_MAX_DISTANCE_MA7 = 0.04
 ENTRY_MAX_MA7_MA13_GAP = 0.035
@@ -878,6 +879,31 @@ def score_stock_candidates(candidates):
     return scored
 
 
+def score_watch_candidates_by_style(candidates):
+    grouped = {}
+    style_order = []
+    for item in candidates or []:
+        style = item.get("style")
+        if style not in grouped:
+            grouped[style] = []
+            style_order.append(style)
+        grouped[style].append(item)
+    scored = []
+    for style in style_order:
+        scored.extend(score_stock_candidates(grouped[style]))
+    return scored
+
+
+def entry_candidate_status(candidate, min_score=ENTRY_MIN_SCORE):
+    feature = (candidate or {}).get("feature", {})
+    if (not feature.get("entry_setup")
+            or float(feature.get("raw_signal_close", 0.0)) <= 0.0):
+        return "WAIT"
+    if float((candidate or {}).get("score", 0.0)) < float(min_score):
+        return "LOW_SCORE"
+    return "READY"
+
+
 def board_allowed(code, allow_chinext=True, allow_star=False, allow_bse=False):
     symbol = str(code).split(".")[0]
     market = str(code).split(".")[-1].upper() if "." in str(code) else ""
@@ -1446,9 +1472,8 @@ def _stock_selection(context, asof, sectors):
         raw_frame = raw_history.get(item["code"])
         raw_close = latest_positive_close(raw_frame)
         item["feature"]["raw_signal_close"] = raw_close
-        item["entry_ready"] = bool(
-            item["feature"].get("entry_setup") and raw_close > 0.0
-        )
+        item["entry_status"] = entry_candidate_status(item)
+        item["entry_ready"] = item["entry_status"] == "READY"
         item["name"] = _instrument_name(context, item["code"])
         if not A.price_coordinate_probe_logged and raw_close > 0.0:
             adjusted_close = float(item["feature"].get("close", 0.0))
@@ -1478,6 +1503,7 @@ def retain_held_watch_candidates(candidates, previous_candidates,
             continue
         kept = dict(item)
         kept["entry_ready"] = False
+        kept["entry_status"] = "HELD"
         kept["held_retained"] = True
         retained.append(kept)
         used_codes.add(code)
@@ -1520,10 +1546,11 @@ def _refresh_watch_entry_signals(context, asof, candidates):
             feature["entry_setup"] = None
         feature["raw_signal_close"] = raw_close
         updated["feature"] = feature
-        updated["entry_ready"] = bool(
-            feature.get("entry_setup") and raw_close > 0.0
-        )
         refreshed.append(updated)
+    refreshed = score_watch_candidates_by_style(refreshed)
+    for item in refreshed:
+        item["entry_status"] = entry_candidate_status(item)
+        item["entry_ready"] = item["entry_status"] == "READY"
     return refreshed
 
 
@@ -2579,7 +2606,10 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
         },
         "risk_caps", market.get("risk_caps", {}),
         "watchlist", len(candidates or []),
-        "entry_ready", len(entry_ready_codes(candidates)),
+        "entry_ready", len([
+            item for item in candidates or []
+            if item.get("entry_ready") and not item.get("held")
+        ]),
     )
     if sectors:
         print(
@@ -2591,10 +2621,15 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
         print(
             "WATCHLIST",
             [(item["style"], item["code"], item.get("name", ""),
-              item["score"], "READY" if item.get("entry_ready") else "WAIT")
+              item["score"], "HELD" if item.get("held") else item.get(
+                  "entry_status", "WAIT"
+              ))
              for item in candidates],
         )
-        ready = [item for item in candidates if item.get("entry_ready")]
+        ready = [
+            item for item in candidates
+            if item.get("entry_ready") and not item.get("held")
+        ]
     else:
         ready = []
     if ready:
@@ -2990,7 +3025,11 @@ def run_daily_cycle(context, asof, trade_date):
         )
 
     held_codes = set(_managed_positions(snapshot).keys())
-    current_entry_ready = entry_ready_codes(A.target_candidates)
+    for item in A.target_candidates:
+        item["held"] = item["code"] in held_codes
+    current_entry_ready = (
+        entry_ready_codes(A.target_candidates) - held_codes
+    )
     for code in list(A.entry_scales.keys()):
         if code not in held_codes and code not in current_entry_ready:
             A.entry_scales.pop(code, None)

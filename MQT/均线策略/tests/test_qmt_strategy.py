@@ -615,6 +615,46 @@ class StockSelectionTests(unittest.TestCase):
         self.assertEqual([item["code"] for item in scored], ["A", "B"])
         self.assertGreater(scored[0]["score"], scored[1]["score"])
 
+    def test_watchlist_score_is_recomputed_instead_of_reusing_old_score(self):
+        candidates = [
+            {"code": "A", "style": "S1", "score": 1.0,
+             "sector": "X", "feature": {
+                 "rs13": 0.10, "rs40": 0.20, "r13": 0.15,
+                 "high_proximity": 0.98, "average_amount": 200000000.0,
+                 "volatility": 0.01, "distance_ma40": 0.08,
+                 "distance_ma13": 0.02, "ma7_ma13_gap": 0.02,
+                 "ma13_ma40_gap": 0.08, "ma7_slope3": 0.012,
+                 "ma13_slope3": 0.008,
+             }},
+            {"code": "B", "style": "S1", "score": 99.0,
+             "sector": "Y", "feature": {
+                 "rs13": 0.01, "rs40": 0.02, "r13": 0.03,
+                 "high_proximity": 0.86, "average_amount": 60000000.0,
+                 "volatility": 0.04, "distance_ma40": 0.20,
+                 "distance_ma13": 0.10, "ma7_ma13_gap": 0.07,
+                 "ma13_ma40_gap": 0.03, "ma7_slope3": 0.002,
+                 "ma13_slope3": 0.001,
+             }},
+        ]
+        rescored = invoke(
+            "score_watch_candidates_by_style", candidates
+        ) or []
+        self.assertEqual([item["code"] for item in rescored], ["A", "B"])
+        self.assertGreater(rescored[0]["score"], rescored[1]["score"])
+
+    def test_entry_requires_absolute_score_floor(self):
+        base = {"feature": {
+            "entry_setup": "trend", "raw_signal_close": 10.0,
+        }}
+        low = dict(base, score=59.99)
+        ready = dict(base, score=60.0)
+        wait = {"score": 90.0, "feature": {
+            "entry_setup": None, "raw_signal_close": 10.0,
+        }}
+        self.assertEqual(invoke("entry_candidate_status", low), "LOW_SCORE")
+        self.assertEqual(invoke("entry_candidate_status", ready), "READY")
+        self.assertEqual(invoke("entry_candidate_status", wait), "WAIT")
+
     def test_board_filter_defaults_can_exclude_star_and_bse(self):
         self.assertFalse(invoke("board_allowed", "688001.SH", True, False, False))
         self.assertFalse(invoke("board_allowed", "430001.BJ", True, False, False))
