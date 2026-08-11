@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.8.3_20260811_NEXT_BAR_SLIPPAGE
+# DOWNLOAD_BUILD: V1.8.4_20260811_BAR_RANGE_SLIPPAGE
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_8_3"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_8_4"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -1629,7 +1629,8 @@ def _order_time(context):
     return datetime.datetime.now().strftime("%H%M%S")
 
 
-def backtest_slippage_price(price, side, slippage_bps=None):
+def backtest_slippage_price(price, side, slippage_bps=None,
+                            bar_low=None, bar_high=None):
     price = float(price)
     bps = float(
         BACKTEST_SLIPPAGE_BPS if slippage_bps is None else slippage_bps
@@ -1637,7 +1638,17 @@ def backtest_slippage_price(price, side, slippage_bps=None):
     if not np.isfinite(price) or price <= 0.0:
         return 0.0
     direction = 1.0 if str(side) == "buy" else -1.0
-    return round(price * (1.0 + direction * bps / 10000.0), 2)
+    target = price * (1.0 + direction * bps / 10000.0)
+    try:
+        low = float(bar_low)
+        high = float(bar_high)
+    except (TypeError, ValueError):
+        low = 0.0
+        high = 0.0
+    if (np.isfinite(low) and np.isfinite(high)
+            and low > 0.0 and high >= low):
+        target = min(high, max(low, target))
+    return round(target, 2)
 
 
 def _submit_order_now(context, side, code, volume, trade_date, reason,
@@ -1683,10 +1694,12 @@ def _submit_order_now(context, side, code, volume, trade_date, reason,
     except (TypeError, ValueError):
         logged_price = -1
     print(
-        "ORDER_SUBMITTED", trade_date, order_time, side, code, volume,
-        "price", logged_price, reason,
-        "signal_time", str(signal_time or order_time),
-        "slippage_bps", round(float(slippage_bps), 4),
+        "ORDER_SUBMITTED {} {} {} {} {} price {} {} signal_time {} "
+        "slippage_bps {}".format(
+            trade_date, order_time, side, code, volume, logged_price,
+            reason, str(signal_time or order_time),
+            round(float(slippage_bps), 4),
+        )
     )
     return True
 
@@ -1726,8 +1739,10 @@ def _send_order(context, side, code, volume, trade_date, reason, price=None,
     })
     A.pending_order_keys.add(signal_key)
     print(
-        "ORDER_QUEUED", trade_date, signal_time, side, code, volume,
-        "reference_price", round(reference_price, 4), reason,
+        "ORDER_QUEUED {} {} {} {} {} reference_price {} {}".format(
+            trade_date, signal_time, side, code, volume,
+            round(reference_price, 4), reason,
+        )
     )
     return True
 
@@ -1747,7 +1762,11 @@ def _flush_pending_orders(context, bar_time):
     ]
     codes = {item["code"] for item in ready}
     tick_map = _simulation_tick(context, codes)
-    raw_prices = _raw_execution_prices(context, codes, "open")
+    raw_bars = _raw_execution_bars(context, codes)
+    raw_prices = {
+        code: float(bar.get("open", 0.0))
+        for code, bar in raw_bars.items()
+    }
     execution_date = bar_time.strftime("%Y%m%d")
     for item in ready:
         signal_key = item.get("signal_key")
@@ -1757,18 +1776,22 @@ def _flush_pending_orders(context, bar_time):
         )
         if base_price <= 0.0:
             print(
-                "ORDER_CANCELLED", execution_date,
-                bar_time.strftime("%H%M%S"), item["side"], item["code"],
-                item["volume"], "missing_next_bar_price", item["reason"],
-                "signal_time", item["signal_time"],
+                "ORDER_CANCELLED {} {} {} {} {} missing_next_bar_price {} "
+                "signal_time {}".format(
+                    execution_date, bar_time.strftime("%H%M%S"),
+                    item["side"], item["code"], item["volume"],
+                    item["reason"], item["signal_time"],
+                )
             )
             continue
         slippage_bps = (
             BACKTEST_SLIPPAGE_BPS if A.mode == "BACKTEST" else 0.0
         )
+        execution_bar = raw_bars.get(item["code"], {})
         execution_price = (
             backtest_slippage_price(
-                base_price, item["side"], slippage_bps
+                base_price, item["side"], slippage_bps,
+                execution_bar.get("low"), execution_bar.get("high"),
             )
             if A.mode == "BACKTEST" else base_price
         )
@@ -1782,12 +1805,14 @@ def _flush_pending_orders(context, bar_time):
             A.build_confirm_plans.pop(item["code"], None)
             A.trend_add_reasons.pop(item["code"], None)
             print(
-                "ORDER_CANCELLED", execution_date,
-                bar_time.strftime("%H%M%S"), item["side"], item["code"],
-                item["volume"], "next_bar_entry_gap", item["reason"],
-                "price", round(execution_price, 4),
-                "max_price", round(float(item["max_price"]), 4),
-                "signal_time", item["signal_time"],
+                "ORDER_CANCELLED {} {} {} {} {} next_bar_entry_gap {} "
+                "price {} max_price {} signal_time {}".format(
+                    execution_date, bar_time.strftime("%H%M%S"),
+                    item["side"], item["code"], item["volume"],
+                    item["reason"], round(execution_price, 4),
+                    round(float(item["max_price"]), 4),
+                    item["signal_time"],
+                )
             )
             continue
         _submit_order_now(
@@ -1807,7 +1832,7 @@ def _simulation_tick(context, codes):
         return {}
 
 
-def _raw_execution_prices(context, codes, field="open"):
+def _raw_execution_bars(context, codes):
     try:
         timetag = context.get_bar_timetag(context.barpos)
         text = timetag_to_datetime(timetag, "%Y%m%d%H%M%S")
@@ -1818,20 +1843,36 @@ def _raw_execution_prices(context, codes, field="open"):
         print("ERROR raw execution time unavailable:", error)
         return {}
     history = fetch_history(
-        context, ["open", "close"], sorted(set(codes or [])),
+        context, ["open", "high", "low", "close"],
+        sorted(set(codes or [])),
         "5m", 1, end_time, "none", 100,
     )
     result = {}
     for code, frame in history.items():
-        if frame is None or len(frame) == 0 or field not in frame.columns:
+        if frame is None or len(frame) == 0 or "open" not in frame.columns:
             continue
         try:
-            price = float(frame[field].iloc[-1])
+            opened = float(frame["open"].iloc[-1])
+            closed = float(frame["close"].iloc[-1])
+            high = float(frame["high"].iloc[-1]) if "high" in frame.columns else max(opened, closed)
+            low = float(frame["low"].iloc[-1]) if "low" in frame.columns else min(opened, closed)
         except (TypeError, ValueError, IndexError):
             continue
-        if np.isfinite(price) and price > 0.0:
-            result[code] = price
+        values = (opened, high, low, closed)
+        if all(np.isfinite(value) and value > 0.0 for value in values):
+            result[code] = {
+                "open": opened, "high": high,
+                "low": low, "close": closed,
+            }
     return result
+
+
+def _raw_execution_prices(context, codes, field="open"):
+    return {
+        code: float(bar.get(field, 0.0))
+        for code, bar in _raw_execution_bars(context, codes).items()
+        if float(bar.get(field, 0.0)) > 0.0
+    }
 
 
 def _execution_price(code, candidate_map, tick_map, side,

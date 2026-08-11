@@ -1292,6 +1292,12 @@ class QmtAdapterTests(unittest.TestCase):
         self.assertEqual(invoke(
             "backtest_slippage_price", 20.0, "sell", 10.0
         ), 19.98)
+        self.assertEqual(invoke(
+            "backtest_slippage_price", 20.0, "buy", 10.0, 19.90, 20.01
+        ), 20.01)
+        self.assertEqual(invoke(
+            "backtest_slippage_price", 20.0, "sell", 10.0, 19.99, 20.10
+        ), 19.99)
 
     def test_backtest_init_rejects_non_5m_main_period(self):
         class FakeContext(object):
