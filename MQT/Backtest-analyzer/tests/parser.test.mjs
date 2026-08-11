@@ -146,3 +146,54 @@ DEAL 20250812 093501 buy 300620.SZ 400 price 66.12`);
   assert.equal(result.stocks[0].buyVolume, 1400);
   assert.equal(result.stocks[0].trades[0].status, 'filled');
 });
+
+test('parses V2.3 market, sector focus, watchlist and entry dimensions', () => {
+  const result = parseQmtLog(`STATE 20260810 exposure 0.6 style_exposures {'000905.SH': 0.6} scores {'000905.SH': 78.5} regimes {'000905.SH': 'STRONG'} risk_caps {'000905.SH': 0.6} reserve 18 watchlist 6 spectators 3 entry_ready 1
+SECTOR_FOCUS 20260810 SW1电子 style 000905.SH leader 78.5 runner 55.0 base_exposure 0.6
+SECTORS [('000905.SH', 'SW1电子', 86.5), ('000905.SH', 'SW1通信', 72.0)]
+WATCHLIST [('000905.SH', '600183.SH', '生益科技', 72.1, 78.2, 69.5, 73.4, 'READY'), ('000905.SH', '002463.SZ', '沪电股份', 68.0, 88.0, 54.0, 60.0, 'OVEREXTENDED')]
+SPECTATORS [('000905.SH', '300476.SZ', '胜宏科技', 92.0, 35.0, 40.0, 'OVEREXTENDED')]
+TARGETS [('000905.SH', '600183.SH', '生益科技', 72.1, 78.2, 69.5, 73.4, 'trend')]`);
+  const day = result.days[0];
+  assert.equal(day.state.regimes['000905.SH'], 'STRONG');
+  assert.equal(day.state.watchlist, 6);
+  assert.equal(day.sectorFocus.sector, 'SW1电子');
+  assert.equal(day.watchlist[0].strengthFit, 69.5);
+  assert.equal(day.watchlist[0].entry, 73.4);
+  assert.equal(day.targets[0].setup, 'trend');
+  assert.equal(day.spectators[0].strength, 92);
+});
+
+test('carries sparse sector and watchlist snapshots and applies entry changes', () => {
+  const result = parseQmtLog(`STATE 20260810 exposure 0.3 style_exposures {'000905.SH': 0.3} scores {'000905.SH': 70} reserve 8 watchlist 2 spectators 0 entry_ready 0
+SECTORS [('000905.SH', 'SW1电子', 80)]
+WATCHLIST [('000905.SH', '600183.SH', '生益科技', 68, 72, 64, 61, 'WAIT')]
+STATE 20260811 exposure 0.3 style_exposures {'000905.SH': 0.3} scores {'000905.SH': 71} reserve 8 watchlist 2 spectators 0 entry_ready 1
+ENTRY_READY 20260811 added [('600183.SH', 'trend', 70, 74, 66, 72)] removed []`);
+  assert.equal(result.days[1].sectors[0].carried, true);
+  assert.equal(result.days[1].watchlist[0].status, 'READY');
+  assert.equal(result.days[1].targets[0].code, '600183.SH');
+  assert.equal(result.days[1].targets[0].entry, 72);
+});
+
+test('accepts future candidate logs that include an explicit sector field', () => {
+  const result = parseQmtLog(`STATE 20260811 exposure 0.6 style_exposures {} scores {}
+WATCHLIST [('000905.SH', '600183.SH', '生益科技', 'SW1电子', 72, 78, 69, 73, 'READY')]`);
+  assert.equal(result.days[0].watchlist[0].sector, 'SW1电子');
+  assert.equal(result.days[0].watchlist[0].score, 72);
+});
+
+test('merges V2.3 queued and submitted orders and preserves cancelled orders', () => {
+  const result = parseQmtLog(`ORDER_QUEUED 20250811 093500 buy 002222.SZ 3700 reference_price 40.27 rebalance
+ORDER_SUBMITTED 20250811 094000 buy 002222.SZ 3700 price 40.28 rebalance signal_time 093500 slippage_bps 10.0
+ORDER_QUEUED 20250812 093500 buy 002222.SZ 100 reference_price 40.50 rebalance
+ORDER_CANCELLED 20250812 094000 buy 002222.SZ 100 next_bar_entry_gap price 42.10 max_price 41.00 signal_time 093500`);
+  const stock = result.stocks[0];
+  assert.equal(stock.orders.length, 2);
+  assert.equal(stock.orders[0].status, 'submitted');
+  assert.equal(stock.orders[0].time, '094000');
+  assert.equal(stock.orders[0].signalTime, '093500');
+  assert.equal(stock.orders[1].status, 'cancelled');
+  assert.equal(stock.trades.length, 1);
+  assert.equal(stock.failedCount, 1);
+});

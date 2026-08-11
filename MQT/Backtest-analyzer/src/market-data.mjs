@@ -26,7 +26,8 @@ async function tencent(path, param, origin = 'https://web.ifzq.gtimg.cn') {
 }
 
 function rows(payload, code, field) {
-  const raw = payload?.data?.[tencentCode(code)]?.[field] || [];
+  const record = payload?.data?.[tencentCode(code)] || {};
+  const raw = record[field] || (field === 'qfqday' ? record.day : null) || [];
   return raw.map((row) => {
     const [time, open, close, high, low, volume, amount] = row;
     return { time, open: +open, close: +close, high: +high, low: +low, volume: +volume, amount: +amount };
@@ -37,7 +38,10 @@ export async function fetchDaily(code, endDate = '', startDate = '') {
   const end = dateText(endDate) || '2050-01-01';
   const start = dateBefore(startDate || endDate, startDate ? 90 : 900);
   const payload = await tencent('fqkline/get', `${tencentCode(code)},day,${start},${end},640,qfq`);
-  return rows(payload, code, 'qfqday');
+  const adjusted = rows(payload, code, 'qfqday');
+  if (adjusted.length) return adjusted;
+  const standard = await tencent('kline/kline', `${tencentCode(code)},day,,,640`);
+  return rows(standard, code, 'day');
 }
 
 export async function fetchThirtyMinute(code, endDate = '') {

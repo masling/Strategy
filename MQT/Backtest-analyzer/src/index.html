@@ -1,35 +1,99 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QMT 回测分析器</title><link rel="stylesheet" href="./styles.css"><style>@media(min-width:801px){.chart-card{position:relative;width:min(980px,100%);min-width:620px;max-width:100%;justify-self:start}.data-note{padding-right:14px}.chart-resize-handle{position:absolute;top:18px;right:-7px;bottom:18px;width:14px;cursor:ew-resize;touch-action:none;z-index:1}.chart-resize-handle:after{content:"";position:absolute;top:42%;left:5px;width:3px;height:54px;border-radius:4px;background:linear-gradient(var(--line),var(--blue),var(--line));opacity:.65}.chart-resize-handle:hover:after,.chart-resize-handle:focus-visible:after{opacity:1;box-shadow:0 0 0 3px rgba(111,183,255,.18)}}.chart-shell{user-select:none}.chart-shell canvas{cursor:grab;outline:none}.chart-shell canvas:active{cursor:grabbing}@media(max-width:800px){.chart-card{width:100%;min-width:0}.chart-resize-handle{display:none}}</style></head>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>QMT 回测分析器</title>
+  <link rel="stylesheet" href="./styles.css?v=20260811-v200">
+</head>
 <body>
-  <style>.overview-panel{min-height:0}.overview-grid{grid-template-columns:repeat(4,1fr)}.chart-head{gap:16px}.chart-actions{display:flex;align-items:end;gap:10px;flex-wrap:wrap;justify-content:flex-end}.stock-picker{color:var(--muted);font-size:12px}.stock-picker select{display:block;margin:4px 0 0;min-width:230px;max-width:330px}.trade-range{color:var(--muted);font-size:12px;margin-left:4px}.chip.failed{background:#3b2428;color:#ff9da7}@media(max-width:800px){.overview-grid{grid-template-columns:repeat(2,1fr)}.chart-head{flex-direction:column}.chart-actions{width:100%;justify-content:space-between}.stock-picker{flex:1}.stock-picker select{width:100%;min-width:0}}</style>
-  <header><div><span class="eyebrow">QMT STRATEGY LAB</span><h1>回测分析器</h1><p>把策略日志还原为大盘、板块、个股与交易点的时间切片。</p></div><div class="status" id="sourceStatus">等待导入日志</div></header>
+  <header>
+    <div>
+      <span class="eyebrow">QMT STRATEGY LAB · V2.0.0</span>
+      <h1>回测复盘工作台</h1>
+      <p>先核对当日指数、板块和入场候选，再下钻到单股买卖细节。</p>
+    </div>
+    <div class="status" id="sourceStatus">等待导入日志</div>
+  </header>
+
   <main>
     <section class="import-panel">
-      <div class="toolbar"><label class="file-button">导入 .log / .txt<input id="fileInput" type="file" accept=".log,.txt,text/plain"></label><button id="sampleButton">载入示例</button><button id="parseButton" class="primary">解析日志</button><label class="date-label">交易日<select id="dateSelect"></select></label></div>
+      <div class="toolbar">
+        <label class="file-button">导入 .log / .txt<input id="fileInput" type="file" accept=".log,.txt,text/plain"></label>
+        <button id="sampleButton">载入示例</button>
+        <button id="parseButton" class="primary">解析日志</button>
+        <span class="toolbar-hint">支持新旧 QMT 策略日志</span>
+      </div>
       <textarea id="logInput" spellcheck="false" placeholder="粘贴 QMT 完整回测输出，或导入日志文件……"></textarea>
     </section>
 
-    <article class="overview-panel"><div class="section-title"><span>00</span>回测统计</div><div id="backtestStats" class="metric-grid overview-grid empty">导入日志后显示</div></article>
+    <article class="overview-panel">
+      <div class="section-title"><span>00</span>回测统计</div>
+      <div id="backtestStats" class="metric-grid overview-grid empty">导入日志后显示</div>
+    </article>
 
-    <section class="summary-grid">
-      <article class="market-card"><div class="section-title"><span>01</span>大盘全局判断</div><div id="marketView" class="market-view empty">导入日志后显示</div></article>
-      <article><div class="section-title"><span>02</span>资金与执行</div><div id="allocationView" class="metric-grid empty">暂无数据</div></article>
+    <nav class="workspace-tabs" aria-label="分析工作区">
+      <button class="workspace-tab active" data-workspace="review" aria-pressed="true"><b>1</b><span>日期复盘<small>指数 → 板块 → 候选股</small></span></button>
+      <button class="workspace-tab" data-workspace="stock" aria-pressed="false"><b>2</b><span>个股操盘<small>买卖时间 · 数量 · K线</small></span></button>
+    </nav>
+
+    <section id="reviewWorkspace" class="workspace active">
+      <div class="review-toolbar">
+        <div><span class="eyebrow">DAILY REVIEW</span><h2>按交易日还原策略决策链</h2></div>
+        <label class="date-label">交易日<select id="dateSelect"></select></label>
+      </div>
+
+      <article class="stage-card">
+        <div class="stage-head"><div><div class="section-title"><span>01</span>指数评分与仓位</div><h2 id="indexChartTitle">选择指数</h2></div><div id="marketSummary" class="stage-summary empty">导入日志后显示</div></div>
+        <div class="stage-grid index-stage">
+          <div id="indexCards" class="selection-list empty">暂无指数评分</div>
+          <div class="visual-panel"><div class="chart-shell context-chart"><canvas id="indexChart" aria-label="指数日K图"></canvas><div id="indexChartLoading" class="chart-loading hidden"></div></div><p id="indexChartNote" class="data-note">指数日K使用腾讯财经公开行情。</p></div>
+        </div>
+      </article>
+
+      <article class="stage-card">
+        <div class="stage-head"><div><div class="section-title"><span>02</span>板块评分与趋势</div><h2 id="sectorChartTitle">选择板块</h2></div><div id="sectorFocus" class="stage-summary empty">当日无唯一主线记录</div></div>
+        <div class="stage-grid">
+          <div id="sectorCards" class="selection-list empty">暂无板块评分</div>
+          <div class="visual-panel"><div class="chart-shell context-chart"><canvas id="sectorChart" aria-label="板块评分趋势图"></canvas></div><p id="sectorChartNote" class="data-note">板块图展示日志中的历次评分，黄点为当前复盘日。</p></div>
+        </div>
+      </article>
+
+      <article class="stage-card">
+        <div class="stage-head"><div><div class="section-title"><span>03</span>个股观察池与入场评分</div><h2 id="candidateTitle">选择指数后查看候选股</h2></div><div id="candidateLegend" class="legend"></div></div>
+        <div class="table-wrap candidate-table"><table><thead><tr><th>代码 / 名称</th><th>所属</th><th>综合</th><th>强度</th><th>匹配</th><th>入场</th><th>状态</th><th>目标 / 当日操作</th></tr></thead><tbody id="candidateRows"></tbody></table></div>
+        <p id="candidateNote" class="data-note"></p>
+      </article>
+
+      <section class="summary-grid">
+        <article><div class="section-title"><span>04</span>市场结构</div><div id="marketView" class="market-view empty">导入日志后显示</div></article>
+        <article><div class="section-title"><span>05</span>资金与执行</div><div id="allocationView" class="metric-grid empty">暂无数据</div></article>
+      </section>
     </section>
 
-    <section class="rank-grid">
-      <article><div class="section-title"><span>03</span>板块评分</div><div class="table-wrap"><table><thead><tr><th>风格</th><th>板块</th><th>评分</th></tr></thead><tbody id="sectorRows"></tbody></table></div></article>
-      <article><div class="section-title"><span>04</span>个股评分</div><div class="table-wrap"><table><thead><tr><th>代码 / 名称</th><th>风格</th><th>评分</th><th>目标 / 当日买卖股数</th></tr></thead><tbody id="stockRows"></tbody></table></div></article>
-    </section>
+    <section id="stockWorkspace" class="workspace">
+      <section id="chartCard" class="chart-card">
+        <div class="chart-head">
+          <div><div class="section-title"><span>01</span>个股全部买卖点</div><h2 id="chartTitle">选择个股</h2></div>
+          <div class="chart-actions">
+            <label class="stock-picker">股票<select id="chartStockSelect"><option value="">无买卖记录</option></select></label>
+            <div class="tabs"><button class="tab active" data-chart="daily" aria-pressed="true">日K</button><button class="tab" data-chart="30m" aria-pressed="false">30 分钟K</button></div>
+          </div>
+        </div>
+        <div id="tradeChips" class="trade-chips"></div>
+        <div class="chart-shell stock-chart"><canvas id="chart" tabindex="0" aria-label="个股行情K线图：滚轮缩放，拖动查看前后区间"></canvas><div id="chartLoading" class="chart-loading hidden"></div></div>
+        <p id="chartRange" class="data-note">日K和30分钟K来自腾讯财经；B/S分别表示买入/卖出。</p>
+        <div id="chartResizeHandle" class="chart-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整行情图表宽度" tabindex="0"></div>
+      </section>
 
-    <section id="chartCard" class="chart-card">
-      <div class="chart-head"><div><div class="section-title"><span>05</span>按股票查看全部买卖点</div><h2 id="chartTitle">选择个股</h2></div><div class="chart-actions"><label class="stock-picker">股票<select id="chartStockSelect"><option value="">无买卖记录</option></select></label><div class="tabs"><button class="tab active" data-chart="daily" aria-pressed="true">日K</button><button class="tab" data-chart="30m" aria-pressed="false">30 分钟K</button></div></div></div>
-      <div id="tradeChips" class="trade-chips"></div><div class="chart-shell"><canvas id="chart" tabindex="0" aria-label="行情K线图：滚轮缩放，拖动查看前后区间"></canvas><div id="chartLoading" class="chart-loading hidden"></div></div>
-      <p id="chartRange" class="data-note">行情来自腾讯财经公开接口；B表示买入，S表示卖出，×N表示同一根K线有N笔。存在DEAL日志时只画实际成交，否则画未发现明确失败的委托；30分钟K只能标注腾讯可提供的近期区间。</p>
-      <div id="chartResizeHandle" class="chart-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整行情图表宽度" tabindex="0"></div>
+      <article class="trade-ledger">
+        <div class="stage-head"><div><div class="section-title"><span>02</span>操盘明细</div><h2>委托、成交与失败记录</h2></div><div id="ledgerSummary" class="stage-summary empty">选择个股后显示</div></div>
+        <div class="table-wrap ledger-table"><table><thead><tr><th>日期</th><th>时间</th><th>方向</th><th>股数</th><th>价格</th><th>状态</th><th>原因</th></tr></thead><tbody id="tradeRows"></tbody></table></div>
+      </article>
     </section>
 
     <section class="diagnostics"><details><summary>解析信息与警告</summary><pre id="diagnosticText"></pre></details></section>
   </main>
-  <script type="module" src="./app.mjs?v=20260806-order-status1"></script>
-</body></html>
+  <script type="module" src="./app.mjs?v=20260811-v200"></script>
+</body>
+</html>

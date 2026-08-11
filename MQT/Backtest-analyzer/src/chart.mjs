@@ -122,3 +122,31 @@ export function drawLine(canvas, rows) {
   line('close', '#6fb7ff'); line('average', COLORS.average);
   ctx.fillStyle = COLORS.text; ctx.font = '11px system-ui'; ctx.fillText(rows[0].time.slice(-5), 42, height - 8); ctx.textAlign = 'right'; ctx.fillText(rows.at(-1).time.slice(-5), width - 16, height - 8);
 }
+
+export function drawScoreSeries(canvas, rows, selectedDate = '') {
+  const { ctx, width, height } = setup(canvas); ctx.clearRect(0, 0, width, height);
+  if (!rows.length) return empty(ctx, width, height, '暂无该板块评分历史');
+  const pad = { l: 42, r: 18, t: 18, b: 30 };
+  const chartW = width - pad.l - pad.r, chartH = height - pad.t - pad.b;
+  const values = rows.map(row => row.value).filter(Number.isFinite);
+  const min = Math.max(0, Math.floor((Math.min(...values) - 5) / 10) * 10);
+  const max = Math.min(100, Math.ceil((Math.max(...values) + 5) / 10) * 10);
+  const span = Math.max(max - min, 10);
+  const x = index => pad.l + index / Math.max(rows.length - 1, 1) * chartW;
+  const y = value => pad.t + (max - value) / span * chartH;
+  ctx.font = '11px system-ui'; ctx.fillStyle = COLORS.text; ctx.strokeStyle = COLORS.grid; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i += 1) {
+    const value = max - span * i / 4, py = y(value);
+    ctx.beginPath(); ctx.moveTo(pad.l, py); ctx.lineTo(width - pad.r, py); ctx.stroke();
+    ctx.fillText(value.toFixed(0), 5, py + 4);
+  }
+  ctx.strokeStyle = COLORS.ma13; ctx.lineWidth = 2; ctx.beginPath();
+  rows.forEach((row, index) => index ? ctx.lineTo(x(index), y(row.value)) : ctx.moveTo(x(index), y(row.value)));
+  ctx.stroke();
+  const selected = rows.findIndex(row => String(row.time).replace(/\D/g, '').slice(0, 8) === String(selectedDate).replace(/\D/g, '').slice(0, 8));
+  const marker = selected >= 0 ? selected : rows.length - 1;
+  ctx.fillStyle = COLORS.amber; ctx.beginPath(); ctx.arc(x(marker), y(rows[marker].value), 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = COLORS.text; ctx.textAlign = 'left'; ctx.fillText(rows[0].time, pad.l, height - 8);
+  ctx.textAlign = 'right'; ctx.fillText(rows.at(-1).time, width - pad.r, height - 8);
+  ctx.fillStyle = COLORS.amber; ctx.fillText(rows[marker].value.toFixed(1), Math.min(width - pad.r, x(marker) + 25), Math.max(12, y(rows[marker].value) - 9));
+}
