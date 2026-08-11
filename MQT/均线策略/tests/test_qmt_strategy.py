@@ -118,6 +118,49 @@ class MarketRegimeTests(unittest.TestCase):
         ) or {}
         self.assertEqual(budgets, {"000300.SH": 0.60})
 
+    def test_isolated_strong_sector_concentrates_sixty_percent(self):
+        sectors = {"000852.SH": [{
+            "member_sector": "SW1电子", "score": 82.0,
+        }]}
+        focus = invoke(
+            "isolated_sector_focus", {"000852.SH": 95.0}, sectors
+        ) or {}
+        self.assertEqual(focus["sector"], "SW1电子")
+        self.assertEqual(focus["exposure"], 0.60)
+        self.assertEqual(invoke(
+            "sector_rotation_exposure_map",
+            {"000852.SH": 95.0}, sectors,
+        ), {"000852.SH": 0.60})
+
+    def test_isolated_moderate_sector_uses_thirty_percent(self):
+        sectors = {"000905.SH": [{
+            "member_sector": "SW1机械设备", "score": 68.0,
+        }]}
+        focus = invoke(
+            "isolated_sector_focus", {"000905.SH": 80.0}, sectors
+        ) or {}
+        self.assertEqual(focus["exposure"], 0.30)
+
+    def test_duplicate_sector_across_styles_is_counted_once(self):
+        sectors = {
+            "000905.SH": [{"member_sector": "SW1通信", "score": 80.0}],
+            "000852.SH": [{"member_sector": "SW1通信", "score": 78.0}],
+        }
+        budgets = invoke(
+            "sector_rotation_exposure_map",
+            {"000905.SH": 90.0, "000852.SH": 95.0}, sectors,
+        ) or {}
+        self.assertEqual(budgets, {"000852.SH": 0.60})
+
+    def test_two_comparable_sectors_do_not_trigger_isolated_focus(self):
+        sectors = {"000300.SH": [
+            {"member_sector": "SW1电子", "score": 80.0},
+            {"member_sector": "SW1通信", "score": 72.0},
+        ]}
+        self.assertIsNone(invoke(
+            "isolated_sector_focus", {"000300.SH": 95.0}, sectors
+        ))
+
     def test_watch_style_exposure_follows_active_sector_count(self):
         budgets = invoke(
             "sector_rotation_exposure_map",

@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.2.0_20260811_ACTIONABLE_RESERVE_STICKY_HOLDINGS
+# DOWNLOAD_BUILD: V2.3.0_20260811_ISOLATED_SECTOR_CONCENTRATION
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_2_0"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_3_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -49,6 +49,11 @@ STARTER_MIN_STRENGTH_SCORE = 25.0
 STARTER_MAX_STRENGTH_SCORE = 92.0
 STARTER_MIN_COMPOSITE_SCORE = 60.0
 STYLE_REDUCTION_DEADBAND = 0.03
+ISOLATED_SECTOR_MIN_SCORE = 65.0
+ISOLATED_SECTOR_STRONG_SCORE = 75.0
+ISOLATED_SECTOR_MIN_GAP = 15.0
+ISOLATED_SECTOR_NORMAL_EXPOSURE = 0.30
+ISOLATED_SECTOR_STRONG_EXPOSURE = 0.60
 ENTRY_MAX_DISTANCE_MA40 = 0.15
 ENTRY_MAX_DISTANCE_MA7 = 0.04
 ENTRY_MAX_MA7_MA13_GAP = 0.035
@@ -335,9 +340,70 @@ def apply_style_risk_caps(exposures, caps):
     }
 
 
+def isolated_sector_focus(scores, sectors_by_style, regimes=None):
+    sector_records = {}
+    for style, items in (sectors_by_style or {}).items():
+        state = str((regimes or {}).get(style, {}).get("state", ""))
+        if regimes is not None and state == "OFF":
+            continue
+        for item in items or []:
+            sector = str(item.get("member_sector", ""))
+            if not sector:
+                continue
+            sector_score = float(item.get("score", 0.0))
+            record = sector_records.setdefault(sector, {
+                "sector": sector, "score": sector_score, "styles": [],
+            })
+            record["score"] = max(float(record["score"]), sector_score)
+            record["styles"].append(style)
+    if not sector_records:
+        return None
+    ranked = sorted(
+        sector_records.values(),
+        key=lambda item: float(item["score"]),
+        reverse=True,
+    )
+    leader = ranked[0]
+    runner_score = float(ranked[1]["score"]) if len(ranked) > 1 else 0.0
+    leader_score = float(leader["score"])
+    if leader_score < ISOLATED_SECTOR_MIN_SCORE:
+        return None
+    if (len(ranked) > 1 and runner_score >= 60.0
+            and leader_score - runner_score < ISOLATED_SECTOR_MIN_GAP):
+        return None
+    eligible_styles = list(dict.fromkeys(leader["styles"]))
+    if not eligible_styles:
+        return None
+    chosen_style = max(
+        eligible_styles,
+        key=lambda style: (
+            1 if str((regimes or {}).get(style, {}).get("state", ""))
+            == "STRONG" else 0,
+            float((scores or {}).get(style, 0.0)),
+        ),
+    )
+    exposure = (
+        ISOLATED_SECTOR_STRONG_EXPOSURE
+        if leader_score >= ISOLATED_SECTOR_STRONG_SCORE
+        else ISOLATED_SECTOR_NORMAL_EXPOSURE
+    )
+    return {
+        "sector": leader["sector"],
+        "style": chosen_style,
+        "leader_score": round(leader_score, 4),
+        "runner_score": round(runner_score, 4),
+        "exposure": exposure,
+    }
+
+
 def sector_rotation_exposure_map(scores, sectors_by_style,
                                  max_total=MAX_TOTAL_EXPOSURE,
                                  regimes=None):
+    focus = isolated_sector_focus(scores, sectors_by_style, regimes)
+    if focus:
+        return {focus["style"]: round(min(
+            float(max_total), float(focus["exposure"])
+        ), 10)}
     budgets = {}
     for code, sector_items in (sectors_by_style or {}).items():
         score = float((scores or {}).get(code, 0.0))
@@ -3341,6 +3407,19 @@ def run_daily_cycle(context, asof, trade_date):
                     continue
                 used_codes.add(item["code"])
                 reserves.append(item)
+        sector_focus = isolated_sector_focus(
+            market["details"], sectors_by_style,
+            regimes=market.get("regimes", {}),
+        )
+        if sector_focus:
+            print(
+                "SECTOR_FOCUS", trade_date,
+                sector_focus["sector"],
+                "style", sector_focus["style"],
+                "leader", sector_focus["leader_score"],
+                "runner", sector_focus["runner_score"],
+                "base_exposure", sector_focus["exposure"],
+            )
         base_style_exposures = sector_rotation_exposure_map(
             market["details"], sectors_by_style,
             regimes=market.get("regimes", {}),
