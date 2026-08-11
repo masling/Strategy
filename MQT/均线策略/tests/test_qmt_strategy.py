@@ -320,6 +320,33 @@ class StockSelectionTests(unittest.TestCase):
         })
         self.assertIsNone(invoke("stock_feature", frame, 0.01, 0.03))
 
+    def test_watchlist_keeps_strong_stock_without_current_entry_setup(self):
+        close = np.concatenate([np.linspace(80.0, 125.0, 118),
+                                np.repeat(130.0, 12)])
+        frame = pd.DataFrame({
+            "close": close, "high": close * 1.01, "low": close * 0.99,
+            "amount": np.repeat(100000000.0, len(close)),
+            "volume": np.repeat(1000000.0, len(close)),
+            "suspendFlag": np.zeros(len(close)),
+        })
+        feature = invoke(
+            "stock_feature", frame, 0.01, 0.03, 50000000.0, False
+        )
+        self.assertIsNotNone(feature)
+        self.assertIsNone(feature["entry_setup"])
+
+    def test_held_candidate_is_retained_when_rank_falls_out(self):
+        previous = [{
+            "code": "A", "style": "S1", "score": 80.0,
+            "entry_ready": True,
+        }]
+        retained = invoke(
+            "retain_held_watch_candidates", [], previous, {"A"}, {"S1"}
+        ) or []
+        self.assertEqual([item["code"] for item in retained], ["A"])
+        self.assertFalse(retained[0]["entry_ready"])
+        self.assertTrue(retained[0]["held_retained"])
+
     def test_stock_feature_rejects_price_far_above_ma40(self):
         close = np.concatenate([np.linspace(60.0, 80.0, 110),
                                 np.linspace(82.0, 125.0, 20)])
@@ -714,6 +741,30 @@ class RiskAndSizingTests(unittest.TestCase):
             desired, {"A": 15000, "B": 15000, "C": 15000, "D": 15000}
         )
 
+    def test_unready_watch_name_is_not_bought_but_existing_holding_is_kept(self):
+        strategy.A.blocked_codes = set()
+        strategy.A.intraday_scales = {}
+        strategy.A.entry_scales = {}
+        snapshot = {
+            "balance": 1000000.0,
+            "positions": {"HELD": {"volume": 10000}},
+        }
+        candidates = [
+            {"code": "HELD", "style": "S1", "score": 70.0,
+             "entry_ready": False, "feature": {"close": 10.0}},
+            {"code": "WAIT", "style": "S1", "score": 90.0,
+             "entry_ready": False, "feature": {"close": 10.0}},
+            {"code": "READY", "style": "S1", "score": 80.0,
+             "entry_ready": True, "feature": {"close": 10.0}},
+        ]
+        desired = invoke(
+            "_desired_share_map", snapshot, {"S1": 0.30}, candidates, {},
+            {"HELD": 10.0, "WAIT": 10.0, "READY": 10.0},
+        ) or {}
+        self.assertIn("HELD", desired)
+        self.assertIn("READY", desired)
+        self.assertNotIn("WAIT", desired)
+
     def test_new_entry_execution_price_must_remain_near_ma7(self):
         candidate = {"feature": {
             "entry_setup": "trend", "close": 103.0,
@@ -808,6 +859,21 @@ class IntradayAggregationTests(unittest.TestCase):
         self.assertEqual(
             invoke("intraday_action", frame, 9.5, 9.0, False), "reduce"
         )
+
+    def test_intraday_top_requires_profit_and_distance_from_daily_mas(self):
+        metrics = {
+            "ma7": 10.0, "ma13": 9.7, "ma40": 9.0,
+            "ma7_slope3": 0.01, "ma13_slope3": 0.006,
+        }
+        self.assertFalse(invoke(
+            "intraday_reduce_ready", metrics, 11.0, 9.9, 10.0
+        ))
+        self.assertFalse(invoke(
+            "intraday_reduce_ready", metrics, 10.3, 10.5, 10.0
+        ))
+        self.assertTrue(invoke(
+            "intraday_reduce_ready", metrics, 11.0, 10.5, 10.0
+        ))
 
     def test_30m_reversal_near_ma7_starts_staged_addback(self):
         frame = pd.DataFrame({

@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.9.0_20260811_RISK_HYSTERESIS_ORDERLY_EXIT
+# DOWNLOAD_BUILD: V2.0.0_20260811_WATCHLIST_ENTRY_SEPARATION
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_9_0"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_0_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -33,6 +33,10 @@ REGIME_WATCH_CAP = 0.30
 REGIME_EXIT_CAP = 0.15
 MAX_TOTAL_EXPOSURE = 0.80
 INTRADAY_REDUCE_RATIO = 1.0 / 3.0
+INTRADAY_REDUCE_MIN_PROFIT = 0.03
+WATCHLIST_MAX_DISTANCE_MA40 = 0.25
+WATCHLIST_MIN_MA13_SLOPE_3D = -0.003
+WATCHLIST_MIN_HIGH_PROXIMITY = 0.80
 ENTRY_MAX_DISTANCE_MA40 = 0.15
 ENTRY_MAX_DISTANCE_MA7 = 0.04
 ENTRY_MAX_MA7_MA13_GAP = 0.035
@@ -598,7 +602,8 @@ def entry_setup_kind(metrics):
 
 
 def stock_feature(frame, sector_return13, sector_return40,
-                  min_average_amount=50000000.0):
+                  min_average_amount=50000000.0,
+                  require_entry_setup=True):
     required = ["close", "high", "low", "amount", "volume"]
     if frame is None or len(frame) < 45:
         return None
@@ -658,16 +663,26 @@ def stock_feature(frame, sector_return13, sector_return40,
         "ma7_ma13_gap": ma7_ma13_gap,
         "ma13_ma40_gap": ma13_ma40_gap,
     })
-    if entry_setup is None:
-        return None
     if average_amount < float(min_average_amount):
         return None
-    if not (-0.08 <= r5 <= 0.15):
-        return None
-    if not (0.0 <= distance_ma13 <= 0.12):
-        return None
-    if high_proximity < 0.85:
-        return None
+    if require_entry_setup:
+        if entry_setup is None:
+            return None
+        if not (-0.08 <= r5 <= 0.15):
+            return None
+        if not (0.0 <= distance_ma13 <= 0.12):
+            return None
+        if high_proximity < 0.85:
+            return None
+    else:
+        if not (
+                close[-1] > ma40 > ma40_prev
+                and ma13 > ma40
+                and ma13_slope3 >= WATCHLIST_MIN_MA13_SLOPE_3D
+                and distance_ma40 <= WATCHLIST_MAX_DISTANCE_MA40
+                and high_proximity >= WATCHLIST_MIN_HIGH_PROXIMITY
+                and -0.12 <= r5 <= 0.20):
+            return None
     rs13 = r13 - float(sector_return13)
     rs40 = r40 - float(sector_return40)
     if rs13 <= 0.0 or rs40 <= 0.0:
@@ -991,6 +1006,17 @@ def addback_trend_ready(metrics, peak_price=None):
         price / ma7 - 1.0 >= ADDBACK_MIN_DISTANCE_MA7
         and price / ma13 - 1.0 >= ADDBACK_MIN_DISTANCE_MA13
     )
+
+
+def intraday_reduce_ready(daily_metrics, peak_price, execution_price,
+                          entry_price):
+    entry = float(entry_price or 0.0)
+    execution = float(execution_price or 0.0)
+    if entry <= 0.0 or execution <= 0.0:
+        return False
+    if execution < entry * (1.0 + INTRADAY_REDUCE_MIN_PROFIT):
+        return False
+    return addback_trend_ready(daily_metrics, peak_price)
 
 
 def ma7_pullback_add_ready(metrics, peak_price=None, pullback_low=None):
@@ -1395,6 +1421,7 @@ def _stock_selection(context, asof, sectors):
             sector_feature_data["return13"],
             sector_feature_data["return40"],
             MIN_AVERAGE_AMOUNT,
+            False,
         )
         if feature is None or _is_st_on(context, code, asof):
             continue
@@ -1403,6 +1430,8 @@ def _stock_selection(context, asof, sectors):
             "sector": sector["member_sector"],
             "sector_code": sector["code"],
             "style": sector["style"],
+            "sector_return13": sector_feature_data["return13"],
+            "sector_return40": sector_feature_data["return40"],
             "feature": feature,
         })
     selected = select_stocks(
@@ -1417,6 +1446,9 @@ def _stock_selection(context, asof, sectors):
         raw_frame = raw_history.get(item["code"])
         raw_close = latest_positive_close(raw_frame)
         item["feature"]["raw_signal_close"] = raw_close
+        item["entry_ready"] = bool(
+            item["feature"].get("entry_setup") and raw_close > 0.0
+        )
         item["name"] = _instrument_name(context, item["code"])
         if not A.price_coordinate_probe_logged and raw_close > 0.0:
             adjusted_close = float(item["feature"].get("close", 0.0))
@@ -1431,6 +1463,68 @@ def _stock_selection(context, asof, sectors):
                 )
                 A.price_coordinate_probe_logged = True
     return selected
+
+
+def retain_held_watch_candidates(candidates, previous_candidates,
+                                 held_codes, active_styles):
+    retained = list(candidates or [])
+    used_codes = {item.get("code") for item in retained}
+    held_codes = set(held_codes or [])
+    active_styles = set(active_styles or [])
+    for item in previous_candidates or []:
+        code = item.get("code")
+        if (code in used_codes or code not in held_codes
+                or item.get("style") not in active_styles):
+            continue
+        kept = dict(item)
+        kept["entry_ready"] = False
+        kept["held_retained"] = True
+        retained.append(kept)
+        used_codes.add(code)
+    return retained
+
+
+def entry_ready_codes(candidates):
+    return {
+        item.get("code") for item in candidates or []
+        if item.get("code") and bool(item.get("entry_ready", False))
+    }
+
+
+def _refresh_watch_entry_signals(context, asof, candidates):
+    candidates = list(candidates or [])
+    codes = [item["code"] for item in candidates]
+    if not codes:
+        return []
+    history = fetch_history(
+        context,
+        ["close", "high", "low", "amount", "volume", "suspendFlag"],
+        codes, "1d", 55, asof, "back_ratio",
+    )
+    raw_history = fetch_history(
+        context, ["close"], codes, "1d", 1, asof, "none",
+    )
+    refreshed = []
+    for item in candidates:
+        updated = dict(item)
+        feature = stock_feature(
+            history.get(item["code"]),
+            float(item.get("sector_return13", 0.0)),
+            float(item.get("sector_return40", 0.0)),
+            MIN_AVERAGE_AMOUNT,
+            False,
+        )
+        raw_close = latest_positive_close(raw_history.get(item["code"]))
+        if feature is None:
+            feature = dict(item.get("feature", {}))
+            feature["entry_setup"] = None
+        feature["raw_signal_close"] = raw_close
+        updated["feature"] = feature
+        updated["entry_ready"] = bool(
+            feature.get("entry_setup") and raw_close > 0.0
+        )
+        refreshed.append(updated)
+    return refreshed
 
 
 def _virtual_backtest_snapshot():
@@ -2104,15 +2198,25 @@ def _desired_share_map(snapshot, style_exposures, candidates, tick_map,
     if not candidates or not style_exposures:
         return desired
     candidate_map = {item["code"]: item for item in candidates}
+    held_codes = {
+        code for code, position in (snapshot.get("positions", {}) or {}).items()
+        if int(position.get("volume", 0)) > 0
+    }
     selected = []
     style_counts = {}
     ordered = sorted(
-        candidates, key=lambda item: float(item.get("score", 0.0)),
-        reverse=True,
+        candidates,
+        key=lambda item: (
+            0 if item.get("code") in held_codes else 1,
+            -float(item.get("score", 0.0)),
+        ),
     )
     for item in ordered:
         code = item["code"]
         if code in getattr(A, "blocked_codes", set()):
+            continue
+        if (code not in held_codes
+                and not bool(item.get("entry_ready", True))):
             continue
         style = item.get("style")
         style_exposure = float(style_exposures.get(style, 0.0))
@@ -2474,6 +2578,8 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
             for code, record in market.get("regimes", {}).items()
         },
         "risk_caps", market.get("risk_caps", {}),
+        "watchlist", len(candidates or []),
+        "entry_ready", len(entry_ready_codes(candidates)),
     )
     if sectors:
         print(
@@ -2481,11 +2587,22 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
             [(item["style"], item["member_sector"], item["score"])
              for item in sectors],
         )
-    if candidates:
+    if sectors and candidates:
+        print(
+            "WATCHLIST",
+            [(item["style"], item["code"], item.get("name", ""),
+              item["score"], "READY" if item.get("entry_ready") else "WAIT")
+             for item in candidates],
+        )
+        ready = [item for item in candidates if item.get("entry_ready")]
+    else:
+        ready = []
+    if ready:
         print(
             "TARGETS",
-            [(item["style"], item["code"], item.get("name", ""), item["score"])
-             for item in candidates],
+            [(item["style"], item["code"], item.get("name", ""),
+              item["score"], item.get("feature", {}).get("entry_setup"))
+             for item in ready],
         )
 
 
@@ -2513,7 +2630,7 @@ def run_intraday_cycle(context, end_time, trade_date):
     history = fetch_history(
         context,
         ["open", "high", "low", "close", "volume", "amount"],
-        codes, "5m", 150, end_time, "back_ratio", 100,
+        codes, "5m", 150, end_time, "none", 100,
     )
     tick_map = _simulation_tick(context, codes)
     execution_prices = _raw_execution_prices(context, codes, "close")
@@ -2599,6 +2716,26 @@ def run_intraday_cycle(context, end_time, trade_date):
         if action == "reduce":
             current = int(positions[code].get("volume", 0))
             available = int(positions[code].get("available", 0))
+            peak_price = (
+                float(bars30.iloc[-2]["high"])
+                if len(bars30) >= 2 else 0.0
+            )
+            meta = A.position_meta.get(code, {})
+            entry_price = float(meta.get(
+                "entry_price", positions[code].get("open_price", 0.0)
+            ))
+            if not intraday_reduce_ready(
+                    daily_metrics, peak_price,
+                    execution_prices.get(code), entry_price):
+                print(
+                    "SKIP_INTRADAY_TOP", trade_date, code,
+                    "entry", round(entry_price, 4),
+                    "price", round(float(
+                        execution_prices.get(code, 0.0) or 0.0
+                    ), 4),
+                    "peak", round(peak_price, 4),
+                )
+                continue
             volume = int(current * INTRADAY_REDUCE_RATIO / 100.0) * 100
             volume = min(volume, available)
             if volume <= 0:
@@ -2609,10 +2746,6 @@ def run_intraday_cycle(context, end_time, trade_date):
                 remaining_ratio = max(0.0, float(current - volume) / current)
                 A.intraday_scales[code] = remaining_ratio
                 A.desired_shares[code] = current - volume
-                peak_price = (
-                    float(bars30.iloc[-2]["high"])
-                    if len(bars30) >= 2 else execution_prices.get(code)
-                )
                 if addback_trend_ready(daily_metrics, peak_price):
                     first_volume = max(
                         100,
@@ -2724,6 +2857,7 @@ def run_intraday_cycle(context, end_time, trade_date):
 def run_daily_cycle(context, asof, trade_date):
     market = _market_state(context, asof)
     market_gate_exposures = dict(market["style_exposures"])
+    previous_entry_ready = set(getattr(A, "entry_ready_codes", set()))
     snapshot = _account_snapshot(context)
     if snapshot is None:
         return
@@ -2753,6 +2887,7 @@ def run_daily_cycle(context, asof, trade_date):
         A.base_style_exposures = {}
         style_exposures = {}
         A.target_candidates = []
+        A.entry_ready_codes = set()
         A.desired_shares = {
             code: 0 for code in _managed_positions(snapshot).keys()
         }
@@ -2795,17 +2930,22 @@ def run_daily_cycle(context, asof, trade_date):
             item for item in targets
             if item.get("style") in style_exposures
         ]
+        held_codes = set(_managed_positions(snapshot).keys())
+        targets = retain_held_watch_candidates(
+            targets, A.target_candidates, held_codes,
+            style_exposures.keys(),
+        )
         used_codes = {item["code"] for item in targets}
         A.target_candidates = targets
         A.blocked_codes = set()
-        held_codes = set(_managed_positions(snapshot).keys())
         A.entry_scales = {
             code: scale for code, scale in A.entry_scales.items()
             if code in used_codes or code in held_codes
         }
         for item in A.target_candidates:
             code = item["code"]
-            if code in held_codes or code in A.entry_scales:
+            if (code in held_codes or code in A.entry_scales
+                    or not bool(item.get("entry_ready", False))):
                 continue
             A.entry_scales[code] = (
                 STARTER_POSITION_SCALE
@@ -2844,6 +2984,45 @@ def run_daily_cycle(context, asof, trade_date):
         )
         A.rebalance_age = 0
 
+    if style_exposures and not rebalance_due:
+        A.target_candidates = _refresh_watch_entry_signals(
+            context, asof, A.target_candidates
+        )
+
+    held_codes = set(_managed_positions(snapshot).keys())
+    current_entry_ready = entry_ready_codes(A.target_candidates)
+    for code in list(A.entry_scales.keys()):
+        if code not in held_codes and code not in current_entry_ready:
+            A.entry_scales.pop(code, None)
+    for item in A.target_candidates:
+        code = item["code"]
+        if (code in held_codes or code not in current_entry_ready
+                or code in A.entry_scales):
+            continue
+        A.entry_scales[code] = (
+            STARTER_POSITION_SCALE
+            if item.get("feature", {}).get("entry_setup")
+            in ("ma40_starter", "base_reclaim") else 1.0
+        )
+    entry_signal_changed = current_entry_ready != previous_entry_ready
+    if entry_signal_changed:
+        candidate_map = {
+            item["code"]: item for item in A.target_candidates
+        }
+        print(
+            "ENTRY_READY", trade_date,
+            "added", [
+                (code, candidate_map.get(code, {}).get("feature", {}).get(
+                    "entry_setup"
+                ), candidate_map.get(code, {}).get("score", 0.0))
+                for code in sorted(
+                    current_entry_ready - previous_entry_ready
+                )
+            ],
+            "removed", sorted(previous_entry_ready - current_entry_ready),
+        )
+    A.entry_ready_codes = set(current_entry_ready)
+
     risk_allocation_changed = (
         style_exposures != A.current_style_exposures
     )
@@ -2856,7 +3035,8 @@ def run_daily_cycle(context, asof, trade_date):
     market["style_exposures"] = dict(style_exposures)
     market["exposure"] = exposure
 
-    if not rebalance_due or not style_exposures or risk_allocation_changed:
+    if (not rebalance_due or not style_exposures
+            or risk_allocation_changed or entry_signal_changed):
         execution_codes = (
             set(_managed_positions(snapshot).keys())
             | {item["code"] for item in A.target_candidates}
@@ -2865,7 +3045,7 @@ def run_daily_cycle(context, asof, trade_date):
             context, execution_codes, "open"
         )
 
-    if (risk_allocation_changed and not rebalance_due
+    if ((risk_allocation_changed or entry_signal_changed) and not rebalance_due
             and style_exposures):
         tick_map = _simulation_tick(
             context, [item["code"] for item in A.target_candidates]
@@ -2905,6 +3085,7 @@ def run_daily_cycle(context, asof, trade_date):
     should_rebalance = (
         rebalance_due or not market_gate_exposures
         or risk_allocation_changed
+        or entry_signal_changed
         or A.retry_rebalance or exit_sent or trend_add_due
     )
     if should_rebalance:
@@ -2962,6 +3143,7 @@ def init(context):
     A.last_processed_date = ""
     A.last_intraday_key = ""
     A.target_candidates = []
+    A.entry_ready_codes = set()
     A.desired_shares = {}
     A.position_meta = {}
     A.intraday_scales = {}
