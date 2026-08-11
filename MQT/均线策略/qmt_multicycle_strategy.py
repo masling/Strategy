@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.0.1_20260811_DAILY_ENTRY_SCORE_FLOOR
+# DOWNLOAD_BUILD: V2.1.0_20260811_EXPANDED_PARTICIPATION_WATCHLIST
 
 import datetime
 
@@ -8,16 +8,17 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_0_1"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_1_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
 MAX_STOCKS_PER_STYLE = 4
-STOCK_CANDIDATE_POOL_PER_STYLE = 6
-MAX_PER_SECTOR = 2
+STOCK_CANDIDATE_POOL_PER_STYLE = 12
+MAX_PER_SECTOR = 4
 MAX_STOCK_WEIGHT = 0.15
 MIN_AVERAGE_AMOUNT = 50000000.0
+MIN_LIQUIDITY_SAMPLE_DAYS = 10
 STYLE_STRONG_SCORE = 80.0
 STYLE_WATCH_SCORE = 70.0
 STYLE_STRONG_EXPOSURE = 0.25
@@ -37,7 +38,7 @@ INTRADAY_REDUCE_MIN_PROFIT = 0.03
 WATCHLIST_MAX_DISTANCE_MA40 = 0.25
 WATCHLIST_MIN_MA13_SLOPE_3D = -0.003
 WATCHLIST_MIN_HIGH_PROXIMITY = 0.80
-ENTRY_MIN_SCORE = 60.0
+ENTRY_MIN_SCORE = 65.0
 ENTRY_MAX_DISTANCE_MA40 = 0.15
 ENTRY_MAX_DISTANCE_MA7 = 0.04
 ENTRY_MAX_MA7_MA13_GAP = 0.035
@@ -602,9 +603,61 @@ def entry_setup_kind(metrics):
     return "base_reclaim" if base_reclaim else None
 
 
+def _daily_limit_ratio(code):
+    symbol = str(code or "").split(".")[0]
+    if str(code or "").endswith(".BJ"):
+        return 0.30
+    if symbol.startswith(("300", "301", "688", "689")):
+        return 0.20
+    return 0.10
+
+
+def effective_amount_metrics(data, code=""):
+    if data is None or len(data) <= 0:
+        return 0.0, 0.0, 0.0, 0, 0
+    close = np.asarray(data["close"], dtype=float)
+    volume = np.asarray(data["volume"], dtype=float)
+    if "suspendFlag" in data.columns:
+        suspended = np.asarray(data["suspendFlag"], dtype=float)
+    else:
+        suspended = np.zeros(len(data), dtype=float)
+    limit_ratio = _daily_limit_ratio(code)
+
+    valid_amounts20 = []
+    valid_amounts5 = []
+    first_index = max(0, len(data) - 20)
+    recent_index = max(0, len(data) - 5)
+    for index in range(first_index, len(data)):
+        if (suspended[index] != 0.0 or volume[index] <= 0.0
+                or amount[index] <= 0.0):
+            continue
+        if index > 0 and close[index - 1] > 0.0:
+            daily_return = close[index] / close[index - 1] - 1.0
+            if (daily_return >= limit_ratio - 0.005
+                    or daily_return <= -limit_ratio + 0.005):
+                continue
+        valid_amounts20.append(amount[index])
+        if index >= recent_index:
+            valid_amounts5.append(amount[index])
+
+    average_amount = (
+        float(np.mean(valid_amounts20)) if valid_amounts20 else 0.0
+    )
+    average_amount5 = (
+        float(np.mean(valid_amounts5)) if valid_amounts5 else 0.0
+    )
+    amount_ratio5 = (
+        average_amount5 / average_amount if average_amount > 0.0 else 0.0
+    )
+    return (
+        average_amount, average_amount5, amount_ratio5,
+        len(valid_amounts20), len(valid_amounts5),
+    )
+
+
 def stock_feature(frame, sector_return13, sector_return40,
                   min_average_amount=50000000.0,
-                  require_entry_setup=True):
+                  require_entry_setup=True, code=""):
     required = ["close", "high", "low", "amount", "volume"]
     if frame is None or len(frame) < 45:
         return None
@@ -632,7 +685,10 @@ def stock_feature(frame, sector_return13, sector_return40,
     ma13_prev3 = float(np.mean(close[-16:-3]))
     ma13_prev = float(np.mean(close[-18:-5]))
     ma40_prev = float(np.mean(close[-45:-5]))
-    average_amount = float(np.mean(amount[-20:]))
+    (average_amount, average_amount5, amount_ratio5,
+     liquidity_days20, liquidity_days5) = effective_amount_metrics(
+        data, code
+    )
     r5 = _return(close, 5)
     r13 = _return(close, 13)
     r40 = _return(close, 40)
@@ -664,7 +720,8 @@ def stock_feature(frame, sector_return13, sector_return40,
         "ma7_ma13_gap": ma7_ma13_gap,
         "ma13_ma40_gap": ma13_ma40_gap,
     })
-    if average_amount < float(min_average_amount):
+    if (liquidity_days20 < MIN_LIQUIDITY_SAMPLE_DAYS
+            or average_amount < float(min_average_amount)):
         return None
     if require_entry_setup:
         if entry_setup is None:
@@ -713,6 +770,12 @@ def stock_feature(frame, sector_return13, sector_return40,
         "high_proximity": high_proximity,
         "recent_peak_price": recent_peak_price,
         "average_amount": average_amount,
+        "average_amount5": average_amount5,
+        "amount_ratio5": amount_ratio5,
+        "liquidity_days20": liquidity_days20,
+        "liquidity_days5": liquidity_days5,
+        "low": latest_low,
+        "previous_high": previous_high,
         "volatility": volatility,
         "atr": atr,
     }
@@ -841,6 +904,100 @@ def entry_structure_score(feature):
     )
 
 
+def _distance_proximity(distance, maximum):
+    return max(0.0, 1.0 - abs(float(distance)) / float(maximum))
+
+
+def entry_opportunity_score(feature):
+    feature = dict(feature or {})
+    close = float(feature.get("close", 0.0))
+    low = float(feature.get("low", close))
+    ma7 = float(feature.get("ma7", 0.0))
+    ma13 = float(feature.get("ma13", 0.0))
+    ma40 = float(feature.get("ma40", 0.0))
+    if min(close, low, ma7, ma13, ma40) <= 0.0:
+        return 0.0
+
+    distance7 = close / ma7 - 1.0
+    distance13 = close / ma13 - 1.0
+    distance40 = close / ma40 - 1.0
+    low7 = low / ma7 - 1.0
+    low13 = low / ma13 - 1.0
+    close_support = max(
+        0.80 * _distance_proximity(distance7, 0.06),
+        _distance_proximity(distance13, 0.10),
+    )
+    low_support = max(
+        0.80 * _distance_proximity(low7, 0.04),
+        _distance_proximity(low13, 0.04),
+    )
+    position_score = 35.0 * close_support + 15.0 * low_support
+
+    gap7 = float(feature.get("ma7_ma13_gap", 0.0))
+    gap13 = float(feature.get("ma13_ma40_gap", 0.0))
+    if gap13 > 0.0:
+        gap_ratio = gap7 / gap13
+        smooth_score = 15.0 * max(
+            0.0, 1.0 - abs(gap_ratio - 0.85) / 0.85
+        )
+    else:
+        smooth_score = 0.0
+
+    slope7 = float(feature.get("ma7_slope3", 0.0))
+    slope13 = float(feature.get("ma13_slope3", 0.0))
+    trend_score = 15.0 * (
+        0.50 * min(1.0, max(0.0, slope7) / 0.018)
+        + 0.50 * min(1.0, max(0.0, slope13) / 0.012)
+    )
+
+    average_amount = float(feature.get("average_amount", 0.0))
+    liquidity_scale = min(1.0, max(
+        0.0, (average_amount - MIN_AVERAGE_AMOUNT) / 150000000.0
+    ))
+    amount_ratio = float(feature.get("amount_ratio5", 0.0))
+    if 0.60 <= amount_ratio <= 1.80:
+        volume_score = 10.0
+    elif 0.40 <= amount_ratio <= 2.50:
+        volume_score = 5.0
+    else:
+        volume_score = 0.0
+    liquidity_score = 5.0 + 5.0 * liquidity_scale + volume_score
+
+    penalty = 0.0
+    if distance7 > 0.05:
+        penalty += min(20.0, (distance7 - 0.05) / 0.05 * 20.0)
+    if distance13 > 0.10:
+        penalty += min(15.0, (distance13 - 0.10) / 0.10 * 15.0)
+    if distance40 > 0.18:
+        penalty += min(15.0, (distance40 - 0.18) / 0.10 * 15.0)
+    if amount_ratio < 0.40 or amount_ratio > 2.50:
+        penalty += 10.0
+    return round(max(0.0, min(
+        100.0,
+        position_score + smooth_score + trend_score
+        + liquidity_score - penalty,
+    )), 4)
+
+
+def participation_wait_reason(feature):
+    feature = dict(feature or {})
+    setup = str(feature.get("entry_setup", ""))
+    distance7 = float(feature.get("distance_ma7", 0.0))
+    distance13 = float(feature.get("distance_ma13", 0.0))
+    distance40 = float(feature.get("distance_ma40", 0.0))
+    max_distance7 = (
+        STARTER_MAX_DISTANCE_MA7
+        if setup in ("ma40_starter", "base_reclaim") else 0.06
+    )
+    if (distance7 > max_distance7 or distance13 > 0.12
+            or distance40 > 0.20):
+        return "OVEREXTENDED"
+    amount_ratio = float(feature.get("amount_ratio5", 0.0))
+    if amount_ratio < 0.40 or amount_ratio > 2.50:
+        return "VOLUME_WAIT"
+    return ""
+
+
 def score_stock_candidates(candidates):
     if not candidates:
         return []
@@ -862,17 +1019,21 @@ def score_stock_candidates(candidates):
     for item in candidates:
         code = item["code"]
         structure = entry_structure_score(item["feature"])
-        score = (
+        strength_score = (
             25.0 * rank_fields["rs13"][code]
             + 20.0 * rank_fields["rs40"][code]
-            + 10.0 * rank_fields["r13"][code]
+            + 15.0 * rank_fields["r13"][code]
             + 5.0 * rank_fields["high_proximity"][code]
             + 10.0 * rank_fields["average_amount"][code]
-            + 5.0 * volatility_rank[code]
-            + 25.0 * structure
+            + 10.0 * volatility_rank[code]
         )
+        strength_score = strength_score / 85.0 * 100.0
+        entry_score = entry_opportunity_score(item["feature"])
+        score = 0.65 * strength_score + 0.35 * entry_score
         result = dict(item)
         result["score"] = round(score, 4)
+        result["strength_score"] = round(strength_score, 4)
+        result["entry_score"] = round(entry_score, 4)
         result["entry_structure_score"] = structure
         scored.append(result)
     scored.sort(key=lambda item: item["score"], reverse=True)
@@ -896,11 +1057,14 @@ def score_watch_candidates_by_style(candidates):
 
 def entry_candidate_status(candidate, min_score=ENTRY_MIN_SCORE):
     feature = (candidate or {}).get("feature", {})
+    wait_reason = participation_wait_reason(feature)
+    if wait_reason:
+        return wait_reason
     if (not feature.get("entry_setup")
             or float(feature.get("raw_signal_close", 0.0)) <= 0.0):
         return "WAIT"
-    if float((candidate or {}).get("score", 0.0)) < float(min_score):
-        return "LOW_SCORE"
+    if float((candidate or {}).get("entry_score", 0.0)) < float(min_score):
+        return "LOW_ENTRY_SCORE"
     return "READY"
 
 
@@ -1448,6 +1612,7 @@ def _stock_selection(context, asof, sectors):
             sector_feature_data["return40"],
             MIN_AVERAGE_AMOUNT,
             False,
+            code,
         )
         if feature is None or _is_st_on(context, code, asof):
             continue
@@ -1539,9 +1704,12 @@ def _refresh_watch_entry_signals(context, asof, candidates):
             float(item.get("sector_return40", 0.0)),
             MIN_AVERAGE_AMOUNT,
             False,
+            item["code"],
         )
         raw_close = latest_positive_close(raw_history.get(item["code"]))
         if feature is None:
+            if not (item.get("held") or item.get("held_retained")):
+                continue
             feature = dict(item.get("feature", {}))
             feature["entry_setup"] = None
         feature["raw_signal_close"] = raw_close
@@ -2621,9 +2789,10 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
         print(
             "WATCHLIST",
             [(item["style"], item["code"], item.get("name", ""),
-              item["score"], "HELD" if item.get("held") else item.get(
-                  "entry_status", "WAIT"
-              ))
+              item["score"], item.get("strength_score", 0.0),
+              item.get("entry_score", 0.0),
+              "HELD" if item.get("held") else item.get(
+                  "entry_status", "WAIT"))
              for item in candidates],
         )
         ready = [
@@ -2636,7 +2805,9 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
         print(
             "TARGETS",
             [(item["style"], item["code"], item.get("name", ""),
-              item["score"], item.get("feature", {}).get("entry_setup"))
+              item["score"], item.get("strength_score", 0.0),
+              item.get("entry_score", 0.0),
+              item.get("feature", {}).get("entry_setup"))
              for item in ready],
         )
 
@@ -3053,7 +3224,9 @@ def run_daily_cycle(context, asof, trade_date):
             "added", [
                 (code, candidate_map.get(code, {}).get("feature", {}).get(
                     "entry_setup"
-                ), candidate_map.get(code, {}).get("score", 0.0))
+                ), candidate_map.get(code, {}).get("score", 0.0),
+                 candidate_map.get(code, {}).get("strength_score", 0.0),
+                 candidate_map.get(code, {}).get("entry_score", 0.0))
                 for code in sorted(
                     current_entry_ready - previous_entry_ready
                 )

@@ -309,6 +309,31 @@ class StockSelectionTests(unittest.TestCase):
         )
         self.assertIsNone(feature)
 
+    def test_liquidity_ignores_suspended_and_limit_days(self):
+        frame = self.make_frame(amount=100000000.0).iloc[-25:].copy()
+        frame.loc[frame.index[-8:-5], "suspendFlag"] = 1.0
+        frame.loc[frame.index[-8:-5], "amount"] = 1000000.0
+        limit_index = frame.index[-10]
+        previous_index = frame.index[-11]
+        frame.loc[limit_index, "close"] = (
+            frame.loc[previous_index, "close"] * 1.10
+        )
+        frame.loc[limit_index, "amount"] = 1000000.0
+        metrics = invoke(
+            "effective_amount_metrics", frame, "000001.SZ"
+        )
+        self.assertAlmostEqual(metrics[0], 100000000.0)
+        self.assertEqual(metrics[3], 16)
+
+    def test_liquidity_requires_enough_normal_trading_days(self):
+        frame = self.make_frame(amount=100000000.0)
+        frame.loc[frame.index[-20:-9], "suspendFlag"] = 1.0
+        feature = invoke(
+            "stock_feature", frame, 0.01, 0.03,
+            50000000.0, False, "000001.SZ",
+        )
+        self.assertIsNone(feature)
+
     def test_stock_feature_rejects_flat_ma7_after_prior_rally(self):
         close = np.concatenate([np.linspace(80.0, 125.0, 118),
                                 np.repeat(130.0, 12)])
@@ -645,15 +670,56 @@ class StockSelectionTests(unittest.TestCase):
     def test_entry_requires_absolute_score_floor(self):
         base = {"feature": {
             "entry_setup": "trend", "raw_signal_close": 10.0,
+            "amount_ratio5": 1.0,
         }}
-        low = dict(base, score=59.99)
-        ready = dict(base, score=60.0)
+        low = dict(base, entry_score=64.99)
+        ready = dict(base, entry_score=65.0)
         wait = {"score": 90.0, "feature": {
             "entry_setup": None, "raw_signal_close": 10.0,
+            "amount_ratio5": 1.0,
         }}
-        self.assertEqual(invoke("entry_candidate_status", low), "LOW_SCORE")
+        self.assertEqual(
+            invoke("entry_candidate_status", low), "LOW_ENTRY_SCORE"
+        )
         self.assertEqual(invoke("entry_candidate_status", ready), "READY")
         self.assertEqual(invoke("entry_candidate_status", wait), "WAIT")
+
+    def test_entry_score_penalizes_overextended_strong_stock(self):
+        near = {
+            "close": 10.2, "low": 9.95,
+            "ma7": 10.1, "ma13": 10.0, "ma40": 9.3,
+            "distance_ma7": 10.2 / 10.1 - 1.0,
+            "distance_ma13": 0.02,
+            "distance_ma40": 10.2 / 9.3 - 1.0,
+            "ma7_ma13_gap": 0.01, "ma13_ma40_gap": 10.0 / 9.3 - 1.0,
+            "ma7_slope3": 0.01, "ma13_slope3": 0.006,
+            "average_amount": 200000000.0, "amount_ratio5": 1.0,
+        }
+        extended = dict(near)
+        extended.update({
+            "close": 12.0, "low": 11.7,
+            "distance_ma7": 12.0 / 10.1 - 1.0,
+            "distance_ma13": 0.20,
+            "distance_ma40": 12.0 / 9.3 - 1.0,
+        })
+        self.assertGreater(
+            invoke("entry_opportunity_score", near),
+            invoke("entry_opportunity_score", extended),
+        )
+        self.assertEqual(
+            invoke("participation_wait_reason", extended),
+            "OVEREXTENDED",
+        )
+
+    def test_entry_waits_for_normal_recent_turnover(self):
+        feature = {
+            "entry_setup": "trend", "distance_ma7": 0.01,
+            "distance_ma13": 0.03, "distance_ma40": 0.10,
+            "amount_ratio5": 3.0,
+        }
+        self.assertEqual(
+            invoke("participation_wait_reason", feature), "VOLUME_WAIT"
+        )
 
     def test_board_filter_defaults_can_exclude_star_and_bse(self):
         self.assertFalse(invoke("board_allowed", "688001.SH", True, False, False))
