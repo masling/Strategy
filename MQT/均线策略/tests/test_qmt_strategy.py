@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import datetime
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -1054,11 +1055,11 @@ class QmtAdapterTests(unittest.TestCase):
         context = FakeContext()
         try:
             self.assertTrue(invoke(
-                "_send_order", context, "buy", "000001.SZ", 1000,
+                "_submit_order_now", context, "buy", "000001.SZ", 1000,
                 "20260805", "rebalance",
             ))
             self.assertTrue(invoke(
-                "_send_order", context, "sell", "600000.SH", 500,
+                "_submit_order_now", context, "sell", "600000.SH", 500,
                 "20260805", "risk_stop",
             ))
             self.assertEqual(calls, [
@@ -1105,7 +1106,7 @@ class QmtAdapterTests(unittest.TestCase):
         try:
             with redirect_stdout(output):
                 self.assertTrue(invoke(
-                    "_send_order", context, "buy", "002755.SZ", 1000,
+                    "_submit_order_now", context, "buy", "002755.SZ", 1000,
                     "20260806", "rebalance", 13.25,
                 ))
             self.assertEqual(calls, [
@@ -1142,7 +1143,15 @@ class QmtAdapterTests(unittest.TestCase):
         calls = []
         strategy.A.mode = "BACKTEST"
         strategy.A.sent_order_keys = set()
+        strategy.A.pending_orders = []
+        strategy.A.pending_order_keys = set()
         strategy.A.owned_codes = set()
+        strategy.A.desired_shares = {}
+        strategy.A.blocked_codes = set()
+        strategy.A.position_meta = {}
+        strategy.A.build_plans = {}
+        strategy.A.build_confirm_plans = {}
+        strategy.A.trend_add_reasons = {}
         strategy.order_shares = lambda *args: calls.append(args)
         strategy.timetag_to_datetime = lambda *args: "20260806100500"
         context = FakeContext()
@@ -1155,7 +1164,8 @@ class QmtAdapterTests(unittest.TestCase):
                 "_send_order", context, "sell", "300620.SZ", 1000,
                 "20260806", "rebalance", 93.66,
             ))
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 0)
+            self.assertEqual(len(strategy.A.pending_orders), 1)
         finally:
             if had_original:
                 strategy.order_shares = original
@@ -1183,7 +1193,7 @@ class QmtAdapterTests(unittest.TestCase):
         context = FakeContext()
         try:
             self.assertTrue(invoke(
-                "_send_order", context, "buy", "000001.SZ", 1000,
+                "_submit_order_now", context, "buy", "000001.SZ", 1000,
                 "20260805", "rebalance",
             ))
             self.assertEqual(calls[0], (
@@ -1195,6 +1205,93 @@ class QmtAdapterTests(unittest.TestCase):
                 strategy.passorder = original_passorder
             else:
                 delattr(strategy, "passorder")
+
+    def test_signal_executes_on_next_5m_open_with_backtest_slippage(self):
+        class FakeContext(object):
+            accountID = "testS"
+            barpos = 0
+
+            @staticmethod
+            def get_bar_timetag(index):
+                return [20260806100000, 20260806100500][index]
+
+            @staticmethod
+            def get_market_data_ex(fields, stocks, **kwargs):
+                return {
+                    code: pd.DataFrame({"open": [20.0], "close": [20.1]})
+                    for code in stocks
+                }
+
+        original_order_shares = getattr(strategy, "order_shares", None)
+        had_order_shares = hasattr(strategy, "order_shares")
+        original_timetag = getattr(strategy, "timetag_to_datetime", None)
+        had_timetag = hasattr(strategy, "timetag_to_datetime")
+        calls = []
+        strategy.A.mode = "BACKTEST"
+        strategy.A.sent_order_keys = set()
+        strategy.A.pending_orders = []
+        strategy.A.pending_order_keys = set()
+        strategy.A.owned_codes = set()
+        strategy.A.desired_shares = {}
+        strategy.A.blocked_codes = set()
+        strategy.A.position_meta = {}
+        strategy.A.build_plans = {}
+        strategy.A.build_confirm_plans = {}
+        strategy.A.trend_add_reasons = {}
+        strategy.order_shares = lambda *args: calls.append(args)
+        strategy.timetag_to_datetime = lambda value, *args: str(value)
+        context = FakeContext()
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                self.assertTrue(invoke(
+                    "_send_order", context, "buy", "000001.SZ", 1000,
+                    "20260806", "rebalance", 19.80, 21.0,
+                ))
+                self.assertTrue(invoke(
+                    "_send_order", context, "buy", "000002.SZ", 1000,
+                    "20260806", "rebalance", 19.80, 19.99,
+                ))
+                self.assertEqual(calls, [])
+                context.barpos = 1
+                invoke(
+                    "_flush_pending_orders", context,
+                    datetime.datetime(2026, 8, 6, 10, 5),
+                )
+            self.assertEqual(calls, [
+                ("000001.SZ", 1000, "fix", 20.02, context, "testS"),
+            ])
+            self.assertIn(
+                "ORDER_QUEUED 20260806 100000 buy 000001.SZ 1000",
+                output.getvalue(),
+            )
+            self.assertIn(
+                "ORDER_SUBMITTED 20260806 100500 buy 000001.SZ 1000 "
+                "price 20.02 rebalance signal_time 100000 slippage_bps 10.0",
+                output.getvalue(),
+            )
+            self.assertIn(
+                "ORDER_CANCELLED 20260806 100500 buy 000002.SZ 1000 "
+                "next_bar_entry_gap",
+                output.getvalue(),
+            )
+        finally:
+            if had_order_shares:
+                strategy.order_shares = original_order_shares
+            else:
+                delattr(strategy, "order_shares")
+            if had_timetag:
+                strategy.timetag_to_datetime = original_timetag
+            else:
+                delattr(strategy, "timetag_to_datetime")
+
+    def test_backtest_slippage_penalizes_buys_and_sells(self):
+        self.assertEqual(invoke(
+            "backtest_slippage_price", 20.0, "buy", 10.0
+        ), 20.02)
+        self.assertEqual(invoke(
+            "backtest_slippage_price", 20.0, "sell", 10.0
+        ), 19.98)
 
     def test_backtest_init_rejects_non_5m_main_period(self):
         class FakeContext(object):

@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.8.2_20260811_POSITION_PRICE_COORDINATE
+# DOWNLOAD_BUILD: V1.8.3_20260811_NEXT_BAR_SLIPPAGE
 
 import datetime
 
@@ -8,8 +8,9 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_8_2"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_8_3"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
+BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
 MAX_STOCKS_PER_STYLE = 4
@@ -1628,7 +1629,19 @@ def _order_time(context):
     return datetime.datetime.now().strftime("%H%M%S")
 
 
-def _send_order(context, side, code, volume, trade_date, reason, price=None):
+def backtest_slippage_price(price, side, slippage_bps=None):
+    price = float(price)
+    bps = float(
+        BACKTEST_SLIPPAGE_BPS if slippage_bps is None else slippage_bps
+    )
+    if not np.isfinite(price) or price <= 0.0:
+        return 0.0
+    direction = 1.0 if str(side) == "buy" else -1.0
+    return round(price * (1.0 + direction * bps / 10000.0), 2)
+
+
+def _submit_order_now(context, side, code, volume, trade_date, reason,
+                      price=None, signal_time="", slippage_bps=0.0):
     volume = int(volume)
     if volume <= 0:
         return False
@@ -1672,8 +1685,116 @@ def _send_order(context, side, code, volume, trade_date, reason, price=None):
     print(
         "ORDER_SUBMITTED", trade_date, order_time, side, code, volume,
         "price", logged_price, reason,
+        "signal_time", str(signal_time or order_time),
+        "slippage_bps", round(float(slippage_bps), 4),
     )
     return True
+
+
+def _send_order(context, side, code, volume, trade_date, reason, price=None,
+                max_price=None):
+    volume = int(volume)
+    if volume <= 0:
+        return False
+    signal_time = _order_time(context)
+    signal_key = (str(trade_date), signal_time, str(code), str(side))
+    if signal_key in getattr(A, "pending_order_keys", set()):
+        return False
+    if not hasattr(A, "pending_orders"):
+        A.pending_orders = []
+    if not hasattr(A, "pending_order_keys"):
+        A.pending_order_keys = set()
+    try:
+        reference_price = float(price)
+    except (TypeError, ValueError):
+        reference_price = 0.0
+    try:
+        maximum_price = float(max_price)
+    except (TypeError, ValueError):
+        maximum_price = 0.0
+    A.pending_orders.append({
+        "signal_bar": str(trade_date) + signal_time,
+        "signal_time": signal_time,
+        "trade_date": str(trade_date),
+        "side": str(side),
+        "code": str(code),
+        "volume": volume,
+        "reason": str(reason),
+        "reference_price": reference_price,
+        "max_price": maximum_price,
+        "signal_key": signal_key,
+    })
+    A.pending_order_keys.add(signal_key)
+    print(
+        "ORDER_QUEUED", trade_date, signal_time, side, code, volume,
+        "reference_price", round(reference_price, 4), reason,
+    )
+    return True
+
+
+def _flush_pending_orders(context, bar_time):
+    pending = list(getattr(A, "pending_orders", []))
+    if not pending:
+        return
+    current_bar = bar_time.strftime("%Y%m%d%H%M%S")
+    ready = [item for item in pending
+             if str(item.get("signal_bar", "")) < current_bar]
+    if not ready:
+        return
+    ready_ids = {id(item) for item in ready}
+    A.pending_orders = [
+        item for item in pending if id(item) not in ready_ids
+    ]
+    codes = {item["code"] for item in ready}
+    tick_map = _simulation_tick(context, codes)
+    raw_prices = _raw_execution_prices(context, codes, "open")
+    execution_date = bar_time.strftime("%Y%m%d")
+    for item in ready:
+        signal_key = item.get("signal_key")
+        A.pending_order_keys.discard(signal_key)
+        base_price = _execution_price(
+            item["code"], {}, tick_map, item["side"], raw_prices
+        )
+        if base_price <= 0.0:
+            print(
+                "ORDER_CANCELLED", execution_date,
+                bar_time.strftime("%H%M%S"), item["side"], item["code"],
+                item["volume"], "missing_next_bar_price", item["reason"],
+                "signal_time", item["signal_time"],
+            )
+            continue
+        slippage_bps = (
+            BACKTEST_SLIPPAGE_BPS if A.mode == "BACKTEST" else 0.0
+        )
+        execution_price = (
+            backtest_slippage_price(
+                base_price, item["side"], slippage_bps
+            )
+            if A.mode == "BACKTEST" else base_price
+        )
+        if (item["side"] == "buy"
+                and float(item.get("max_price", 0.0)) > 0.0
+                and execution_price > float(item["max_price"])):
+            A.desired_shares[item["code"]] = 0
+            A.blocked_codes.add(item["code"])
+            A.position_meta.pop(item["code"], None)
+            A.build_plans.pop(item["code"], None)
+            A.build_confirm_plans.pop(item["code"], None)
+            A.trend_add_reasons.pop(item["code"], None)
+            print(
+                "ORDER_CANCELLED", execution_date,
+                bar_time.strftime("%H%M%S"), item["side"], item["code"],
+                item["volume"], "next_bar_entry_gap", item["reason"],
+                "price", round(execution_price, 4),
+                "max_price", round(float(item["max_price"]), 4),
+                "signal_time", item["signal_time"],
+            )
+            continue
+        _submit_order_now(
+            context, item["side"], item["code"], item["volume"],
+            execution_date, item["reason"], execution_price,
+            item["signal_time"], slippage_bps,
+        )
 
 
 def _simulation_tick(context, codes):
@@ -1773,22 +1894,27 @@ def entry_raw_price_levels(candidate):
     }
 
 
-def buy_entry_price_allowed(price, candidate):
+def entry_max_execution_price(candidate):
     levels = entry_raw_price_levels(candidate)
     feature = (candidate or {}).get("feature", {})
     setup = str(feature.get("entry_setup", ""))
-    if price <= 0.0 or levels is None:
-        return False
+    if levels is None:
+        return 0.0
     max_distance = (
         STARTER_MAX_DISTANCE_MA7
         if setup in ("ma40_starter", "base_reclaim")
         else ENTRY_MAX_DISTANCE_MA7
     )
-    return bool(
-        price <= levels["ma7"] * (1.0 + max_distance)
-        and price <= levels["ma40"] * (1.0 + ENTRY_MAX_DISTANCE_MA40)
-        and price <= levels["signal_close"] * (1.0 + ENTRY_MAX_EXECUTION_GAP)
+    return min(
+        levels["ma7"] * (1.0 + max_distance),
+        levels["ma40"] * (1.0 + ENTRY_MAX_DISTANCE_MA40),
+        levels["signal_close"] * (1.0 + ENTRY_MAX_EXECUTION_GAP),
     )
+
+
+def buy_entry_price_allowed(price, candidate):
+    maximum = entry_max_execution_price(candidate)
+    return bool(price > 0.0 and maximum > 0.0 and price <= maximum)
 
 
 def _desired_share_map(snapshot, style_exposures, candidates, tick_map,
@@ -1939,7 +2065,9 @@ def _rebalance_to_desired(context, snapshot, trade_date):
         )
         if _send_order(
                 context, "buy", code, order_volume, trade_date,
-                order_reason, price):
+                order_reason, price,
+                entry_max_execution_price(candidate)
+                if current <= 0 else None):
             sent_any = True
             retry = True
             cash -= order_volume * price
@@ -2603,6 +2731,8 @@ def init(context):
     A.blocked_codes = set()
     A.owned_codes = set()
     A.sent_order_keys = set()
+    A.pending_orders = []
+    A.pending_order_keys = set()
     A.logged_deal_keys = set()
     A.retry_rebalance = False
     A.execution_prices = {}
@@ -2667,11 +2797,14 @@ def handlebar(context):
         asof = (now - datetime.timedelta(days=1)).strftime("%Y%m%d")
         bar_time = now
     if trade_date != A.last_processed_date:
+        _flush_pending_orders(context, bar_time)
         A.last_processed_date = trade_date
         try:
             run_daily_cycle(context, asof, trade_date)
         except Exception as error:
             print("ERROR daily cycle failed:", trade_date, error)
+    else:
+        _flush_pending_orders(context, bar_time)
     if _is_30m_close(bar_time):
         intraday_key = bar_time.strftime("%Y%m%d%H%M")
         if intraday_key != A.last_intraday_key:
