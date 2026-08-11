@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.8.0_20260811_INTRADAY_BUILD_CONFIRM
+# DOWNLOAD_BUILD: V1.8.1_20260811_PRICE_COORDINATE_GUARD
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_8_0"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_8_1"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -1233,8 +1233,31 @@ def _stock_selection(context, asof, sectors):
         score_stock_candidates(candidates),
         STOCK_CANDIDATE_POOL_PER_STYLE, MAX_PER_SECTOR
     )
+    raw_history = fetch_history(
+        context, ["close"], [item["code"] for item in selected],
+        "1d", 1, asof, "none",
+    )
     for item in selected:
+        raw_frame = raw_history.get(item["code"])
+        raw_close = 0.0
+        if raw_frame is not None and "close" in raw_frame.columns:
+            values = _clean_array(raw_frame["close"])
+            if len(values) > 0 and values[-1] > 0.0:
+                raw_close = float(values[-1])
+        item["feature"]["raw_signal_close"] = raw_close
         item["name"] = _instrument_name(context, item["code"])
+        if not A.price_coordinate_probe_logged and raw_close > 0.0:
+            adjusted_close = float(item["feature"].get("close", 0.0))
+            if adjusted_close > 0.0:
+                print(
+                    "PRICE_COORD", asof, item["code"],
+                    "adjusted_close", round(adjusted_close, 6),
+                    "raw_close", round(raw_close, 6),
+                    "raw_per_adjusted", round(
+                        raw_close / adjusted_close, 10
+                    ),
+                )
+                A.price_coordinate_probe_logged = True
     return selected
 
 
@@ -1699,14 +1722,31 @@ def _buy_is_tradeable(code, tick):
     return price / previous < limit_ratio - 0.002
 
 
-def buy_entry_price_allowed(price, candidate):
+def entry_raw_price_levels(candidate):
     feature = (candidate or {}).get("feature", {})
     ma7 = float(feature.get("ma7", 0.0))
     signal_close = float(feature.get("close", 0.0))
     ma40 = float(feature.get("ma40", 0.0))
+    raw_signal_close = float(feature.get("raw_signal_close", 0.0))
+    if (ma7 <= 0.0 or signal_close <= 0.0 or ma40 <= 0.0
+            or raw_signal_close <= 0.0):
+        return None
+    raw_per_adjusted = raw_signal_close / signal_close
+    if not np.isfinite(raw_per_adjusted) or raw_per_adjusted <= 0.0:
+        return None
+    return {
+        "ma7": ma7 * raw_per_adjusted,
+        "ma40": ma40 * raw_per_adjusted,
+        "signal_close": raw_signal_close,
+        "raw_per_adjusted": raw_per_adjusted,
+    }
+
+
+def buy_entry_price_allowed(price, candidate):
+    levels = entry_raw_price_levels(candidate)
+    feature = (candidate or {}).get("feature", {})
     setup = str(feature.get("entry_setup", ""))
-    if (price <= 0.0 or ma7 <= 0.0 or ma40 <= 0.0
-            or signal_close <= 0.0):
+    if price <= 0.0 or levels is None:
         return False
     max_distance = (
         STARTER_MAX_DISTANCE_MA7
@@ -1714,9 +1754,9 @@ def buy_entry_price_allowed(price, candidate):
         else ENTRY_MAX_DISTANCE_MA7
     )
     return bool(
-        price <= ma7 * (1.0 + max_distance)
-        and price <= ma40 * (1.0 + ENTRY_MAX_DISTANCE_MA40)
-        and price <= signal_close * (1.0 + ENTRY_MAX_EXECUTION_GAP)
+        price <= levels["ma7"] * (1.0 + max_distance)
+        and price <= levels["ma40"] * (1.0 + ENTRY_MAX_DISTANCE_MA40)
+        and price <= levels["signal_close"] * (1.0 + ENTRY_MAX_EXECUTION_GAP)
     )
 
 
@@ -1843,17 +1883,17 @@ def _rebalance_to_desired(context, snapshot, trade_date):
             continue
         candidate = candidate_map.get(code)
         if current <= 0 and not buy_entry_price_allowed(price, candidate):
+            raw_levels = entry_raw_price_levels(candidate) or {}
             A.desired_shares[code] = 0
             A.blocked_codes.add(code)
             print(
                 "SKIP_BUY", trade_date, code, "entry_price_too_far",
                 "price", round(price, 4),
-                "ma7", round(float((candidate or {}).get(
-                    "feature", {}
-                ).get("ma7", 0.0)), 4),
-                "ma40", round(float((candidate or {}).get(
-                    "feature", {}
-                ).get("ma40", 0.0)), 4),
+                "raw_ma7", round(float(raw_levels.get("ma7", 0.0)), 4),
+                "raw_ma40", round(float(raw_levels.get("ma40", 0.0)), 4),
+                "raw_signal_close", round(float(raw_levels.get(
+                    "signal_close", 0.0
+                )), 4),
             )
             continue
         affordable = int(cash * 0.98 / price / 100) * 100
@@ -2502,6 +2542,7 @@ def init(context):
     A.retry_rebalance = False
     A.execution_prices = {}
     A.sector_source_logged = set()
+    A.price_coordinate_probe_logged = False
     A.first_bar_logged = False
     A.last_portfolio_log_date = ""
     A.actual_backtest_start = None

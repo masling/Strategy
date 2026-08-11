@@ -651,6 +651,7 @@ class RiskAndSizingTests(unittest.TestCase):
         candidate = {"feature": {
             "entry_setup": "trend", "close": 103.0,
             "ma7": 100.0, "ma40": 92.0,
+            "raw_signal_close": 103.0,
         }}
         self.assertTrue(invoke("buy_entry_price_allowed", 103.5, candidate))
         self.assertFalse(invoke("buy_entry_price_allowed", 105.0, candidate))
@@ -659,6 +660,7 @@ class RiskAndSizingTests(unittest.TestCase):
         candidate = {"feature": {
             "entry_setup": "ma40_starter", "close": 106.0,
             "ma7": 100.0, "ma40": 94.0,
+            "raw_signal_close": 106.0,
         }}
         self.assertTrue(invoke("buy_entry_price_allowed", 107.0, candidate))
         self.assertFalse(invoke("buy_entry_price_allowed", 109.5, candidate))
@@ -667,8 +669,31 @@ class RiskAndSizingTests(unittest.TestCase):
         candidate = {"feature": {
             "entry_setup": "trend", "close": 10.322,
             "ma7": 10.302, "ma40": 8.646,
+            "raw_signal_close": 10.322,
         }}
         self.assertFalse(invoke("buy_entry_price_allowed", 11.0, candidate))
+
+    def test_entry_guard_converts_adjusted_ma_to_raw_price_coordinate(self):
+        candidate = {"feature": {
+            "entry_setup": "trend", "close": 934.0,
+            "ma7": 925.0, "ma40": 850.0,
+            "raw_signal_close": 20.0,
+        }}
+        levels = invoke("entry_raw_price_levels", candidate) or {}
+        self.assertAlmostEqual(levels["signal_close"], 20.0)
+        self.assertAlmostEqual(levels["ma7"], 925.0 * 20.0 / 934.0)
+        self.assertTrue(invoke("buy_entry_price_allowed", 20.3, candidate))
+        self.assertFalse(invoke("buy_entry_price_allowed", 20.7, candidate))
+
+    def test_entry_guard_rejects_candidate_without_raw_signal_close(self):
+        candidate = {"feature": {
+            "entry_setup": "trend", "close": 934.0,
+            "ma7": 925.0, "ma40": 850.0,
+        }}
+        self.assertIsNone(invoke("entry_raw_price_levels", candidate))
+        self.assertFalse(invoke(
+            "buy_entry_price_allowed", 20.0, candidate
+        ))
 
 
 class IntradayAggregationTests(unittest.TestCase):
