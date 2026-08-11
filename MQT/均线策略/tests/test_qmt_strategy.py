@@ -493,7 +493,7 @@ class StockSelectionTests(unittest.TestCase):
         })
         self.assertIsNone(setup)
 
-    def test_shengtun_september_26_is_ma40_starter(self):
+    def test_shengtun_september_26_rejects_falling_ma7_starter(self):
         setup = invoke("entry_setup_kind", {
             "close": 8.962, "low": 8.512, "previous_high": 8.702,
             "ma7": 8.359, "ma7_prev1": 8.315, "ma7_prev2": 8.338,
@@ -504,7 +504,63 @@ class StockSelectionTests(unittest.TestCase):
             "ma7_ma13_gap": 8.359 / 8.517 - 1.0,
             "ma13_ma40_gap": 8.517 / 8.244 - 1.0,
         })
+        self.assertIsNone(setup)
+
+    def test_flowing_trend_requires_normalized_gap_and_slope_alignment(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 105.0, "low": 103.0, "previous_high": 104.0,
+            "ma7": 101.2, "ma7_prev1": 100.8, "ma7_prev2": 100.4,
+            "ma13": 100.5, "ma40": 97.5,
+            "ma13_prev": 99.8, "ma40_prev": 96.8,
+            "ma7_slope3": 0.015, "ma13_slope3": 0.009,
+            "ma40_slope5": 0.0072,
+            "distance_ma40": 105.0 / 97.5 - 1.0,
+            "ma7_ma13_gap": 101.2 / 100.5 - 1.0,
+            "ma13_ma40_gap": 100.5 / 97.5 - 1.0,
+        })
+        self.assertEqual(setup, "trend")
+
+    def test_trend_rejects_short_gap_when_ma13_ma40_is_overextended(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 105.0, "low": 103.0, "previous_high": 104.0,
+            "ma7": 101.0, "ma7_prev1": 100.4, "ma7_prev2": 99.8,
+            "ma13": 100.0, "ma40": 90.0,
+            "ma13_prev": 99.3, "ma40_prev": 89.4,
+            "ma7_slope3": 0.015, "ma13_slope3": 0.009,
+            "ma40_slope5": 0.0072,
+            "distance_ma40": 105.0 / 90.0 - 1.0,
+            "ma7_ma13_gap": 101.0 / 100.0 - 1.0,
+            "ma13_ma40_gap": 100.0 / 90.0 - 1.0,
+        })
+        self.assertIsNone(setup)
+
+    def test_ma40_starter_needs_ma7_turn_and_flat_to_rising_ma13(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 104.0, "low": 98.5, "previous_high": 103.0,
+            "ma7": 100.3, "ma7_prev1": 100.0, "ma7_prev2": 100.2,
+            "ma13": 100.0, "ma40": 97.0,
+            "ma13_prev": 99.8, "ma40_prev": 96.6,
+            "ma7_slope3": -0.001, "ma13_slope3": 0.003,
+            "ma40_slope5": 0.0041,
+            "distance_ma40": 104.0 / 97.0 - 1.0,
+            "ma7_ma13_gap": 100.3 / 100.0 - 1.0,
+            "ma13_ma40_gap": 100.0 / 97.0 - 1.0,
+        })
         self.assertEqual(setup, "ma40_starter")
+
+    def test_shanghai_xinyang_starter_rejects_ma7_falling_toward_ma13(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 61.95, "low": 59.9, "previous_high": 61.2,
+            "ma7": 60.8, "ma7_prev1": 61.4, "ma7_prev2": 62.0,
+            "ma13": 60.2, "ma40": 57.8,
+            "ma13_prev": 60.0, "ma40_prev": 57.2,
+            "ma7_slope3": -0.010, "ma13_slope3": 0.003,
+            "ma40_slope5": 0.005,
+            "distance_ma40": 61.95 / 57.8 - 1.0,
+            "ma7_ma13_gap": 60.8 / 60.2 - 1.0,
+            "ma13_ma40_gap": 60.2 / 57.8 - 1.0,
+        })
+        self.assertIsNone(setup)
 
     def test_entry_structure_score_prefers_smooth_lower_position(self):
         smooth = {
@@ -522,7 +578,7 @@ class StockSelectionTests(unittest.TestCase):
             invoke("entry_structure_score", high),
         )
 
-    def test_tinci_april_10_ma40_reversal_is_starter_setup(self):
+    def test_tinci_april_10_rejects_unconfirmed_ma7_reversal(self):
         setup = invoke("entry_setup_kind", {
             "close": 46.421, "low": 43.551, "previous_high": 45.101,
             "ma7": 44.46, "ma13": 44.69, "ma40": 43.54,
@@ -532,7 +588,7 @@ class StockSelectionTests(unittest.TestCase):
             "ma7_ma13_gap": 44.46 / 44.69 - 1.0,
             "ma13_ma40_gap": 44.69 / 43.54 - 1.0,
         })
-        self.assertEqual(setup, "ma40_starter")
+        self.assertIsNone(setup)
 
     def test_tinci_april_24_ma13_reversal_activates_trend_add(self):
         metrics = {
@@ -542,7 +598,7 @@ class StockSelectionTests(unittest.TestCase):
         }
         self.assertTrue(invoke("trend_add_ready", metrics, 10))
 
-    def test_salt_lake_december_17_flat_ma13_is_low_starter(self):
+    def test_salt_lake_december_17_rejects_declining_ma13_starter(self):
         setup = invoke("entry_setup_kind", {
             "close": 26.98, "low": 25.67, "previous_high": 25.28,
             "ma7": 25.49, "ma13": 25.62, "ma40": 25.52,
@@ -552,7 +608,7 @@ class StockSelectionTests(unittest.TestCase):
             "ma7_ma13_gap": 25.49 / 25.62 - 1.0,
             "ma13_ma40_gap": 25.62 / 25.52 - 1.0,
         })
-        self.assertEqual(setup, "ma40_starter")
+        self.assertIsNone(setup)
 
     def test_salt_lake_december_31_adds_near_ma7(self):
         metrics = {
@@ -603,7 +659,7 @@ class StockSelectionTests(unittest.TestCase):
             invoke("trend_add_signal", metrics, 5, "ma40_starter")
         )
 
-    def test_salt_lake_february_24_is_secondary_base_reclaim(self):
+    def test_salt_lake_february_24_rejects_unbalanced_base_reclaim(self):
         setup = invoke("entry_setup_kind", {
             "close": 35.66, "low": 34.51, "previous_high": 33.91,
             "ma7": 33.65, "ma13": 33.28, "ma40": 32.22,
@@ -613,7 +669,7 @@ class StockSelectionTests(unittest.TestCase):
             "ma7_ma13_gap": 33.65 / 33.28 - 1.0,
             "ma13_ma40_gap": 33.28 / 32.22 - 1.0,
         })
-        self.assertEqual(setup, "base_reclaim")
+        self.assertIsNone(setup)
 
     def test_secondary_base_can_complete_on_immediate_resume(self):
         metrics = {
@@ -1062,7 +1118,8 @@ class RiskAndSizingTests(unittest.TestCase):
             "ma7": 100.0, "ma40": 92.0,
             "raw_signal_close": 103.0,
         }}
-        self.assertTrue(invoke("buy_entry_price_allowed", 103.5, candidate))
+        self.assertTrue(invoke("buy_entry_price_allowed", 103.0, candidate))
+        self.assertFalse(invoke("buy_entry_price_allowed", 103.5, candidate))
         self.assertFalse(invoke("buy_entry_price_allowed", 105.0, candidate))
 
     def test_starter_allows_wider_ma7_distance_but_rejects_large_gap(self):
@@ -1071,7 +1128,8 @@ class RiskAndSizingTests(unittest.TestCase):
             "ma7": 100.0, "ma40": 94.0,
             "raw_signal_close": 106.0,
         }}
-        self.assertTrue(invoke("buy_entry_price_allowed", 107.0, candidate))
+        self.assertTrue(invoke("buy_entry_price_allowed", 105.0, candidate))
+        self.assertFalse(invoke("buy_entry_price_allowed", 107.0, candidate))
         self.assertFalse(invoke("buy_entry_price_allowed", 109.5, candidate))
 
     def test_shengtun_october_gap_open_is_not_a_valid_entry_price(self):

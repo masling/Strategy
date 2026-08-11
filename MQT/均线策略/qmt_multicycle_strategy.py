@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.3.0_20260811_ISOLATED_SECTOR_CONCENTRATION
+# DOWNLOAD_BUILD: V2.4.0_20260811_MA_FLOW_ENTRY_FILTER
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_3_0"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -54,14 +54,22 @@ ISOLATED_SECTOR_STRONG_SCORE = 75.0
 ISOLATED_SECTOR_MIN_GAP = 15.0
 ISOLATED_SECTOR_NORMAL_EXPOSURE = 0.30
 ISOLATED_SECTOR_STRONG_EXPOSURE = 0.60
-ENTRY_MAX_DISTANCE_MA40 = 0.15
+ENTRY_MAX_DISTANCE_MA40 = 0.12
 ENTRY_MAX_DISTANCE_MA7 = 0.04
 ENTRY_MAX_MA7_MA13_GAP = 0.035
 ENTRY_ABSOLUTE_MAX_MA7_MA13_GAP = 0.035
-ENTRY_MAX_GAP_RATIO = 1.25
+MA7_MA13_SPAN_DAYS = 3.0
+MA13_MA40_SPAN_DAYS = 13.5
+ENTRY_MIN_GAP_RATIO = 0.75
+ENTRY_MAX_GAP_RATIO = 1.80
 ENTRY_MAX_EXECUTION_GAP = 0.03
 ENTRY_MIN_MA7_SLOPE_3D = 0.003
 ENTRY_MIN_MA13_SLOPE_3D = 0.0015
+MA_SLOPE_DAILY_MIN = 0.0003
+MA7_TO_MA13_SLOPE_MIN_RATIO = 0.80
+MA7_TO_MA13_SLOPE_MAX_RATIO = 2.80
+MA13_TO_MA40_SLOPE_MIN_RATIO = 0.60
+MA13_TO_MA40_SLOPE_MAX_RATIO = 3.20
 ADDBACK_WINDOW_DAYS = 3
 ADDBACK_FIRST_RATIO = 0.5
 ADDBACK_SUPPORT_TOLERANCE = 0.02
@@ -70,11 +78,13 @@ ADDBACK_MIN_MA13_SLOPE_3D = 0.0005
 ADDBACK_MIN_DISTANCE_MA7 = 0.05
 ADDBACK_MIN_DISTANCE_MA13 = 0.08
 STARTER_POSITION_SCALE = 0.5
-STARTER_MAX_MA7_MA13_GAP = 0.02
-STARTER_MAX_DISTANCE_MA40 = 0.15
+STARTER_MAX_MA7_MA13_GAP = 0.015
+STARTER_MAX_MA13_MA40_GAP = 0.045
+STARTER_MAX_DISTANCE_MA40 = 0.08
 STARTER_MAX_DISTANCE_MA7 = 0.08
 STARTER_SUPPORT_TOLERANCE = 0.035
-STARTER_MIN_MA13_SLOPE_3D = -0.008
+STARTER_MIN_MA7_SLOPE_3D = -0.003
+STARTER_MIN_MA13_SLOPE_3D = 0.0
 TREND_ADD_WINDOW_DAYS = 15
 TREND_ADD_SUPPORT_TOLERANCE = 0.02
 INTRADAY_STAND_TOLERANCE = 0.005
@@ -615,6 +625,37 @@ def _atr(frame, count=14):
     return float(np.mean(true_range[-count:]))
 
 
+def ma_gap_ratio_in_flow_zone(gap7, gap13,
+                              minimum=ENTRY_MIN_GAP_RATIO,
+                              maximum=ENTRY_MAX_GAP_RATIO):
+    """Require MA7/13 and MA13/40 openings to expand proportionally."""
+    short_gap = float(gap7)
+    long_gap = float(gap13)
+    if short_gap <= 0.0 or long_gap <= 0.0:
+        return False
+    # MA7/13 and MA13/40 use different time spans.  Compare their
+    # opening speed, not their raw distances (a steady trend is ~1.0).
+    ratio = (
+        short_gap / MA7_MA13_SPAN_DAYS
+        / (long_gap / MA13_MA40_SPAN_DAYS)
+    )
+    return float(minimum) <= ratio <= float(maximum)
+
+
+def ma_slopes_in_flow_zone(slope7, slope13, slope40):
+    """Keep MA7/13/40 rising in the same direction without a runaway leg."""
+    rate7 = float(slope7) / 3.0
+    rate13 = float(slope13) / 3.0
+    rate40 = float(slope40) / 5.0
+    if min(rate7, rate13, rate40) < MA_SLOPE_DAILY_MIN:
+        return False
+    return bool(
+        MA7_TO_MA13_SLOPE_MIN_RATIO
+        <= rate7 / rate13 <= MA7_TO_MA13_SLOPE_MAX_RATIO
+        and MA13_TO_MA40_SLOPE_MIN_RATIO
+        <= rate13 / rate40 <= MA13_TO_MA40_SLOPE_MAX_RATIO
+    )
+
 def entry_setup_kind(metrics):
     close = float(metrics["close"])
     low = float(metrics["low"])
@@ -626,6 +667,9 @@ def entry_setup_kind(metrics):
     ma40_prev = float(metrics["ma40_prev"])
     slope7 = float(metrics["ma7_slope3"])
     slope13 = float(metrics["ma13_slope3"])
+    slope40 = float(metrics.get(
+        "ma40_slope5", ma40 / ma40_prev - 1.0
+    ))
     distance40 = float(metrics["distance_ma40"])
     distance7 = close / ma7 - 1.0 if ma7 > 0.0 else float("inf")
     gap7 = float(metrics["ma7_ma13_gap"])
@@ -641,10 +685,8 @@ def entry_setup_kind(metrics):
         and distance7 <= ENTRY_MAX_DISTANCE_MA7
         and distance40 <= ENTRY_MAX_DISTANCE_MA40
         and gap7 <= ENTRY_ABSOLUTE_MAX_MA7_MA13_GAP
-        and gap7 <= max(
-            ENTRY_MAX_MA7_MA13_GAP,
-            ENTRY_MAX_GAP_RATIO * gap13
-        )
+        and ma_gap_ratio_in_flow_zone(gap7, gap13)
+        and ma_slopes_in_flow_zone(slope7, slope13, slope40)
     )
     if trend_entry:
         return "trend"
@@ -653,11 +695,14 @@ def entry_setup_kind(metrics):
         and ma40 > ma40_prev
         and slope13 >= STARTER_MIN_MA13_SLOPE_3D
         and ma7 >= ma13 * (1.0 - STARTER_MAX_MA7_MA13_GAP)
-        and slope7 >= -0.02
+        and slope7 >= STARTER_MIN_MA7_SLOPE_3D
+        and ma7 > ma7_prev1 <= ma7_prev2
+        and ma13 >= ma13_prev
         and abs(low / ma40 - 1.0) <= STARTER_SUPPORT_TOLERANCE
         and close > previous_high
         and distance7 <= STARTER_MAX_DISTANCE_MA7
         and distance40 <= STARTER_MAX_DISTANCE_MA40
+        and gap13 <= STARTER_MAX_MA13_MA40_GAP
     )
     if ma40_starter:
         return "ma40_starter"
@@ -671,10 +716,7 @@ def entry_setup_kind(metrics):
         and close > previous_high
         and distance7 <= STARTER_MAX_DISTANCE_MA7
         and distance40 <= BASE_RECLAIM_MAX_DISTANCE_MA40
-        and gap7 <= max(
-            ENTRY_MAX_MA7_MA13_GAP,
-            ENTRY_MAX_GAP_RATIO * gap13,
-        )
+        and ma_gap_ratio_in_flow_zone(gap7, gap13, 0.40)
     )
     return "base_reclaim" if base_reclaim else None
 
@@ -776,6 +818,7 @@ def stock_feature(frame, sector_return13, sector_return40,
     ma13_ma40_gap = ma13 / ma40 - 1.0
     ma7_slope3 = ma7 / ma7_prev3 - 1.0
     ma13_slope3 = ma13 / ma13_prev3 - 1.0
+    ma40_slope5 = ma40 / ma40_prev - 1.0
     latest_low = float(data["low"].iloc[-1])
     previous_high = float(data["high"].iloc[-2])
     high40 = float(np.max(np.asarray(data["high"], dtype=float)[-40:]))
@@ -793,6 +836,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "ma13": ma13, "ma40": ma40,
         "ma13_prev": ma13_prev, "ma40_prev": ma40_prev,
         "ma7_slope3": ma7_slope3, "ma13_slope3": ma13_slope3,
+        "ma40_slope5": ma40_slope5,
         "distance_ma40": distance_ma40,
         "ma7_ma13_gap": ma7_ma13_gap,
         "ma13_ma40_gap": ma13_ma40_gap,
@@ -844,6 +888,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "ma13_ma40_gap": ma13_ma40_gap,
         "ma7_slope3": ma7_slope3,
         "ma13_slope3": ma13_slope3,
+        "ma40_slope5": ma40_slope5,
         "entry_setup": entry_setup,
         "selection_eligible": selection_eligible,
         "high_proximity": high_proximity,
