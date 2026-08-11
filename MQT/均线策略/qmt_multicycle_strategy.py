@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.1.0_20260811_EXPANDED_PARTICIPATION_WATCHLIST
+# DOWNLOAD_BUILD: V2.1.1_20260811_FIX_LIQUIDITY_AMOUNT_ARRAY
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_1_0"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_1_1"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -616,6 +616,7 @@ def effective_amount_metrics(data, code=""):
     if data is None or len(data) <= 0:
         return 0.0, 0.0, 0.0, 0, 0
     close = np.asarray(data["close"], dtype=float)
+    amount = np.asarray(data["amount"], dtype=float)
     volume = np.asarray(data["volume"], dtype=float)
     if "suspendFlag" in data.columns:
         suspended = np.asarray(data["suspendFlag"], dtype=float)
@@ -669,7 +670,6 @@ def stock_feature(frame, sector_return13, sector_return40,
         return None
 
     close = np.asarray(data["close"], dtype=float)
-    amount = np.asarray(data["amount"], dtype=float)
     volume = np.asarray(data["volume"], dtype=float)
     if close[-1] <= 0 or volume[-1] <= 0:
         return None
