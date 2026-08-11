@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.8.1_20260811_PRICE_COORDINATE_GUARD
+# DOWNLOAD_BUILD: V1.8.2_20260811_POSITION_PRICE_COORDINATE
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_8_1"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_8_2"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -616,6 +616,41 @@ def position_metrics(frame):
         "recent_pullback": recent_pullback,
         "atr": _atr(data, 14),
     }
+
+
+def latest_positive_close(frame):
+    if frame is None or "close" not in frame.columns:
+        return 0.0
+    values = _clean_array(frame["close"])
+    if len(values) <= 0 or values[-1] <= 0.0:
+        return 0.0
+    return float(values[-1])
+
+
+def position_metrics_in_raw_coordinate(metrics, raw_close):
+    if not metrics:
+        return None
+    adjusted_close = float(metrics.get("close", 0.0))
+    raw_close = float(raw_close)
+    if (adjusted_close <= 0.0 or raw_close <= 0.0
+            or not np.isfinite(adjusted_close)
+            or not np.isfinite(raw_close)):
+        return None
+    raw_per_adjusted = raw_close / adjusted_close
+    if not np.isfinite(raw_per_adjusted) or raw_per_adjusted <= 0.0:
+        return None
+    converted = dict(metrics)
+    for field in (
+            "close", "high", "low", "previous_high",
+            "ma7", "ma7_prev1", "ma13", "ma40",
+            "recent_peak_price", "atr"):
+        value = float(converted.get(field, 0.0))
+        if np.isfinite(value):
+            converted[field] = value * raw_per_adjusted
+    converted["close"] = raw_close
+    converted["adjusted_close"] = adjusted_close
+    converted["raw_per_adjusted"] = raw_per_adjusted
+    return converted
 
 
 def select_stocks(candidates, max_count=6, max_per_sector=2):
@@ -1239,11 +1274,7 @@ def _stock_selection(context, asof, sectors):
     )
     for item in selected:
         raw_frame = raw_history.get(item["code"])
-        raw_close = 0.0
-        if raw_frame is not None and "close" in raw_frame.columns:
-            values = _clean_array(raw_frame["close"])
-            if len(values) > 0 and values[-1] > 0.0:
-                raw_close = float(values[-1])
+        raw_close = latest_positive_close(raw_frame)
         item["feature"]["raw_signal_close"] = raw_close
         item["name"] = _instrument_name(context, item["code"])
         if not A.price_coordinate_probe_logged and raw_close > 0.0:
@@ -1971,15 +2002,45 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         context, ["close", "high", "low"], list(positions.keys()),
         "1d", 55, asof, "back_ratio"
     )
+    raw_history = fetch_history(
+        context, ["close"], list(positions.keys()),
+        "1d", 1, asof, "none"
+    )
     sent = False
     active_codes = set()
     A.daily_position_metrics = {}
     for code, position in positions.items():
         active_codes.add(code)
-        metrics = position_metrics(history.get(code))
+        adjusted_metrics = position_metrics(history.get(code))
+        raw_close = latest_positive_close(raw_history.get(code))
+        metrics = position_metrics_in_raw_coordinate(
+            adjusted_metrics, raw_close
+        )
         if metrics is None:
+            if code not in A.position_coordinate_miss_logged:
+                print(
+                    "SKIP_RISK_COORD", trade_date, code,
+                    "adjusted_close", round(float(
+                        (adjusted_metrics or {}).get("close", 0.0)
+                    ), 6),
+                    "raw_close", round(raw_close, 6),
+                )
+                A.position_coordinate_miss_logged.add(code)
             continue
         A.daily_position_metrics[code] = metrics
+        if not A.position_coordinate_probe_logged:
+            print(
+                "POSITION_COORD", asof, code,
+                "adjusted_close", round(float(
+                    metrics.get("adjusted_close", 0.0)
+                ), 6),
+                "raw_close", round(float(metrics["close"]), 6),
+                "raw_ma7", round(float(metrics["ma7"]), 6),
+                "raw_ma13", round(float(metrics["ma13"]), 6),
+                "raw_ma40", round(float(metrics["ma40"]), 6),
+                "raw_atr", round(float(metrics["atr"]), 6),
+            )
+            A.position_coordinate_probe_logged = True
         plan = A.addback_plans.get(code)
         if plan and int(plan.get("age", 0)) > ADDBACK_WINDOW_DAYS:
             planned_added = int(plan.get("added_volume", 0))
@@ -2010,6 +2071,8 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
                 "below_ma13_days": 0,
                 "style": None,
             }
+        elif float(position.get("open_price", 0.0)) > 0.0:
+            meta["entry_price"] = float(position["open_price"])
         candidate = next(
             (item for item in A.target_candidates if item["code"] == code),
             None,
@@ -2155,6 +2218,7 @@ def run_intraday_cycle(context, end_time, trade_date):
                 print(
                     "BUILD_CONFIRMED", trade_date, code,
                     support_kind, round(support, 4), "daily_close",
+                    "coordinate", "raw",
                 )
                 A.build_confirm_plans.pop(code, None)
             else:
@@ -2165,6 +2229,7 @@ def run_intraday_cycle(context, end_time, trade_date):
                     print(
                         "BUILD_CONFIRMED", trade_date, code,
                         support_kind, round(support, 4), "first_hour",
+                        "coordinate", "raw",
                     )
                     A.build_confirm_plans.pop(code, None)
                 elif confirmed is False:
@@ -2543,6 +2608,8 @@ def init(context):
     A.execution_prices = {}
     A.sector_source_logged = set()
     A.price_coordinate_probe_logged = False
+    A.position_coordinate_probe_logged = False
+    A.position_coordinate_miss_logged = set()
     A.first_bar_logged = False
     A.last_portfolio_log_date = ""
     A.actual_backtest_start = None

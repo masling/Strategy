@@ -494,6 +494,32 @@ class StockSelectionTests(unittest.TestCase):
         self.assertIn("ma40", metrics)
         self.assertGreater(metrics["atr"], 0.0)
 
+    def test_position_metrics_are_converted_to_raw_price_coordinate(self):
+        adjusted = {
+            "close": 934.0, "high": 950.0, "low": 910.0,
+            "previous_high": 940.0,
+            "ma7": 925.0, "ma7_prev1": 920.0,
+            "ma13": 900.0, "ma40": 850.0,
+            "recent_peak_price": 960.0, "atr": 28.0,
+            "ma7_slope3": 0.02, "ma13_slope3": 0.01,
+        }
+        raw = invoke(
+            "position_metrics_in_raw_coordinate", adjusted, 20.0
+        ) or {}
+        factor = 20.0 / 934.0
+        self.assertAlmostEqual(raw["close"], 20.0)
+        self.assertAlmostEqual(raw["ma7"], 925.0 * factor)
+        self.assertAlmostEqual(raw["ma13"], 900.0 * factor)
+        self.assertAlmostEqual(raw["ma40"], 850.0 * factor)
+        self.assertAlmostEqual(raw["atr"], 28.0 * factor)
+        self.assertAlmostEqual(raw["ma7_slope3"], 0.02)
+        self.assertAlmostEqual(raw["raw_per_adjusted"], factor)
+
+    def test_position_coordinate_conversion_rejects_missing_raw_close(self):
+        self.assertIsNone(invoke(
+            "position_metrics_in_raw_coordinate", {"close": 934.0}, 0.0
+        ))
+
     def test_select_stocks_enforces_two_names_per_sector(self):
         candidates = [
             {"code": "A", "sector": "S1", "score": 100.0},
