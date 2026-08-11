@@ -1,6 +1,6 @@
 # QMT Backtest Analyzer
 
-当前版本：`V2.0.0`（2026-08-11）
+当前版本：`V2.0.1`（2026-08-11）
 
 读取 `MQT/均线策略/qmt_multicycle_strategy.py` 输出的回测日志，页面分为两个工作区：
 
@@ -23,6 +23,8 @@ npm run dev
 ```
 
 打开 `http://localhost:4173`，导入QMT回测输出的 `.log` / `.txt` 文件，或直接粘贴日志。
+
+直接粘贴时，点击页面顶部的“直接粘贴日志”，粘贴完后点击“解析日志”；也可使用 `Ctrl/Cmd + Enter` 直接解析。
 
 ## 数据说明
 

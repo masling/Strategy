@@ -9,7 +9,7 @@
 <body>
   <header>
     <div>
-      <span class="eyebrow">QMT STRATEGY LAB · V2.0.0</span>
+      <span class="eyebrow">QMT STRATEGY LAB · V2.0.1</span>
       <h1>回测复盘工作台</h1>
       <p>先核对当日指数、板块和入场候选，再下钻到单股买卖细节。</p>
     </div>
@@ -20,6 +20,7 @@
     <section class="import-panel">
       <div class="toolbar">
         <label class="file-button">导入 .log / .txt<input id="fileInput" type="file" accept=".log,.txt,text/plain"></label>
+        <button id="pasteButton" aria-expanded="false" aria-controls="logInput">直接粘贴日志</button>
         <button id="sampleButton">载入示例</button>
         <button id="parseButton" class="primary">解析日志</button>
         <span class="toolbar-hint">支持新旧 QMT 策略日志</span>
@@ -94,6 +95,6 @@
 
     <section class="diagnostics"><details><summary>解析信息与警告</summary><pre id="diagnosticText"></pre></details></section>
   </main>
-  <script type="module" src="./app.mjs?v=20260811-v200"></script>
+  <script type="module" src="./app.mjs?v=20260811-v201"></script>
 </body>
 </html>
