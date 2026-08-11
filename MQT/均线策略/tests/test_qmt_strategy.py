@@ -743,6 +743,97 @@ class IntradayAggregationTests(unittest.TestCase):
                    True, 0, 0, False)
         )
 
+    def test_starter_add_uses_two_30m_bars_over_daily_ma13(self):
+        frame = pd.DataFrame({
+            "open": [9.9, 10.05], "high": [10.15, 10.3],
+            "low": [9.82, 9.98], "close": [10.05, 10.2],
+            "volume": [100.0, 120.0], "amount": [1000.0, 1200.0],
+        }, index=pd.to_datetime(["2026-08-03 10:00", "2026-08-03 10:30"]))
+        daily_metrics = {
+            "ma7": 10.4, "ma7_prev1": 10.3,
+            "ma13": 9.9, "ma40": 9.2,
+            "ma7_slope3": 0.01, "ma13_slope3": 0.006,
+            "recent_peak_price": 11.0,
+        }
+        self.assertEqual(
+            invoke(
+                "intraday_build_add_signal", frame, daily_metrics,
+                3, "ma40_starter",
+            ),
+            "ma13",
+        )
+
+    def test_starter_ma7_add_keeps_daily_smoothness_guard(self):
+        frame = pd.DataFrame({
+            "open": [9.98, 10.08], "high": [10.15, 10.3],
+            "low": [9.95, 10.0], "close": [10.1, 10.2],
+            "volume": [100.0, 120.0], "amount": [1000.0, 1200.0],
+        }, index=pd.to_datetime(["2026-08-03 10:00", "2026-08-03 10:30"]))
+        daily_metrics = {
+            "ma7": 10.0, "ma7_prev1": 9.99,
+            "ma13": 9.5, "ma40": 9.0,
+            "ma7_slope3": 0.01, "ma13_slope3": 0.006,
+            "recent_peak_price": 11.0,
+        }
+        self.assertEqual(
+            invoke("intraday_build_add_signal", frame, daily_metrics, 3),
+            "ma7",
+        )
+
+    def test_starter_add_rejects_unstable_or_cross_day_30m_bars(self):
+        daily_metrics = {
+            "ma7": 10.4, "ma7_prev1": 10.3,
+            "ma13": 9.9, "ma40": 9.2,
+            "ma7_slope3": 0.01, "ma13_slope3": 0.006,
+            "recent_peak_price": 11.0,
+        }
+        unstable = pd.DataFrame({
+            "open": [9.9, 9.95], "high": [10.1, 10.05],
+            "low": [9.82, 9.8], "close": [9.85, 10.0],
+            "volume": [100.0, 120.0], "amount": [1000.0, 1200.0],
+        }, index=pd.to_datetime(["2026-08-03 10:00", "2026-08-03 10:30"]))
+        cross_day = unstable.copy()
+        cross_day.index = pd.to_datetime([
+            "2026-08-02 14:30", "2026-08-03 10:00",
+        ])
+        self.assertIsNone(invoke(
+            "intraday_build_add_signal", unstable, daily_metrics, 3
+        ))
+        self.assertIsNone(invoke(
+            "intraday_build_add_signal", cross_day, daily_metrics, 3
+        ))
+
+    def test_next_day_first_hour_confirms_daily_support(self):
+        frame = pd.DataFrame({
+            "open": [10.0, 10.1], "high": [10.2, 10.3],
+            "low": [9.98, 10.02], "close": [10.1, 10.2],
+            "volume": [100.0, 120.0], "amount": [1000.0, 1200.0],
+        }, index=pd.to_datetime(["2026-08-04 10:00", "2026-08-04 10:30"]))
+        self.assertTrue(invoke(
+            "first_hour_daily_support_confirmed",
+            frame, "20260804", 10.0,
+        ))
+
+    def test_next_day_first_hour_rejects_lost_daily_support(self):
+        frame = pd.DataFrame({
+            "open": [10.0, 10.05], "high": [10.2, 10.1],
+            "low": [9.98, 9.85], "close": [10.1, 9.9],
+            "volume": [100.0, 120.0], "amount": [1000.0, 1200.0],
+        }, index=pd.to_datetime(["2026-08-04 10:00", "2026-08-04 10:30"]))
+        self.assertFalse(invoke(
+            "first_hour_daily_support_confirmed",
+            frame, "20260804", 10.0,
+        ))
+
+    def test_failed_confirmation_only_removes_shares_above_starter_base(self):
+        plan = {"base_volume": 1000, "added_volume": 1000}
+        self.assertEqual(
+            invoke("build_add_rollback_volume", 1400, 1400, plan), 400
+        )
+        self.assertEqual(
+            invoke("build_add_rollback_volume", 1000, 1000, plan), 0
+        )
+
     def test_ma7_pullback_requires_six_percent_and_non_turning_ma7(self):
         metrics = {
             "ma7": 10.0, "ma7_prev1": 9.99,

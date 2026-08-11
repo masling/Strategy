@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.7.4_20260811_MA7_SMOOTH_TREND_GUARD
+# DOWNLOAD_BUILD: V1.8.0_20260811_INTRADAY_BUILD_CONFIRM
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_7_4"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_8_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -46,6 +46,7 @@ STARTER_SUPPORT_TOLERANCE = 0.035
 STARTER_MIN_MA13_SLOPE_3D = -0.008
 TREND_ADD_WINDOW_DAYS = 15
 TREND_ADD_SUPPORT_TOLERANCE = 0.02
+INTRADAY_STAND_TOLERANCE = 0.005
 MA7_ADD_MIN_PULLBACK = 0.06
 MA7_ADD_MAX_ROLLOVER = 0.001
 MA7_ADD_MIN_GAP_RATIO = 0.50
@@ -507,6 +508,9 @@ def stock_feature(frame, sector_return13, sector_return40,
     latest_low = float(data["low"].iloc[-1])
     previous_high = float(data["high"].iloc[-2])
     high40 = float(np.max(np.asarray(data["high"], dtype=float)[-40:]))
+    recent_peak_price = float(
+        np.max(np.asarray(data["high"], dtype=float)[-10:])
+    )
     high_proximity = close[-1] / high40 if high40 > 0 else 0.0
     atr = _atr(data, 14)
 
@@ -559,6 +563,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "ma13_slope3": ma13_slope3,
         "entry_setup": entry_setup,
         "high_proximity": high_proximity,
+        "recent_peak_price": recent_peak_price,
         "average_amount": average_amount,
         "volatility": volatility,
         "atr": atr,
@@ -607,6 +612,7 @@ def position_metrics(frame):
         "ma7_slope3": ma7 / ma7_prev3 - 1.0,
         "ma13_slope3": ma13 / ma13_prev3 - 1.0,
         "ma40_slope5": ma40 / ma40_prev5 - 1.0,
+        "recent_peak_price": peak_price,
         "recent_pullback": recent_pullback,
         "atr": _atr(data, 14),
     }
@@ -883,6 +889,100 @@ def trend_add_signal(metrics, age, setup=""):
 
 def trend_add_ready(metrics, age, setup=""):
     return trend_add_signal(metrics, age, setup) is not None
+
+
+def intraday_build_add_signal(frame30, daily_metrics, age, setup=""):
+    """Use complete 30m bars to confirm support defined by daily MA values."""
+    if not daily_metrics or int(age) > TREND_ADD_WINDOW_DAYS:
+        return None
+    if frame30 is None or len(frame30) < 2:
+        return None
+    data = frame30.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=["open", "high", "low", "close", "volume"]
+    )
+    if len(data) < 2:
+        return None
+    previous = data.iloc[-2]
+    latest = data.iloc[-1]
+    previous_time = pd.Timestamp(data.index[-2])
+    latest_time = pd.Timestamp(data.index[-1])
+    if previous_time.date() != latest_time.date():
+        return None
+
+    ma7 = float(daily_metrics.get("ma7", 0.0))
+    ma13 = float(daily_metrics.get("ma13", 0.0))
+    ma40 = float(daily_metrics.get("ma40", 0.0))
+    if not (ma7 > ma13 > ma40 > 0.0):
+        return None
+    if float(daily_metrics.get("ma7_slope3", 0.0)) < ENTRY_MIN_MA7_SLOPE_3D:
+        return None
+    if float(daily_metrics.get("ma13_slope3", 0.0)) < ENTRY_MIN_MA13_SLOPE_3D:
+        return None
+
+    support_low = min(float(previous["low"]), float(latest["low"]))
+
+    def stands_on(support):
+        return bool(
+            float(previous["close"]) >= support
+            and float(latest["close"]) >= support
+            and float(latest["low"])
+            >= support * (1.0 - INTRADAY_STAND_TOLERANCE)
+            and float(latest["close"]) >= float(previous["close"])
+        )
+
+    if (abs(support_low / ma13 - 1.0) <= TREND_ADD_SUPPORT_TOLERANCE
+            and stands_on(ma13)):
+        return "ma13"
+    if (abs(support_low / ma7 - 1.0) <= TREND_ADD_SUPPORT_TOLERANCE
+            and stands_on(ma7)
+            and ma7_pullback_add_ready(
+                daily_metrics,
+                daily_metrics.get("recent_peak_price"), support_low,
+            )):
+        return "ma7"
+    return None
+
+
+def first_hour_daily_support_confirmed(frame30, trade_date, support):
+    """Return None before 10:30, otherwise confirm two bars over a daily MA."""
+    if frame30 is None or frame30.empty or float(support) <= 0.0:
+        return None
+    data = frame30.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=["open", "high", "low", "close", "volume"]
+    )
+    if data.empty:
+        return None
+    index = _datetime_index(data.index)
+    day = pd.to_datetime(str(trade_date), format="%Y%m%d", errors="coerce")
+    if pd.isna(day):
+        return None
+    same_day = data[index.normalize() == day.normalize()].copy()
+    same_day.index = index[index.normalize() == day.normalize()]
+    first_hour = same_day[
+        same_day.index.strftime("%H%M").isin(["1000", "1030"])
+    ]
+    if len(first_hour) < 2 or first_hour.index[-1].strftime("%H%M") < "1030":
+        return None
+    first = first_hour.iloc[-2]
+    second = first_hour.iloc[-1]
+    return bool(
+        float(first["close"]) >= float(support)
+        and float(second["close"]) >= float(support)
+        and float(second["low"])
+        >= float(support) * (1.0 - INTRADAY_STAND_TOLERANCE)
+        and float(second["close"]) >= float(first["close"])
+    )
+
+
+def build_add_rollback_volume(position_volume, available_volume, plan):
+    current = max(0, int(position_volume))
+    available = max(0, int(available_volume))
+    added = max(0, int((plan or {}).get("added_volume", 0)))
+    base = max(0, int((plan or {}).get(
+        "base_volume", max(0, current - added)
+    )))
+    excess = max(0, current - base)
+    return int(min(available, added, excess) / 100.0) * 100
 
 
 def _confirmed_30m_reversal(previous, latest):
@@ -1808,6 +1908,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         A.daily_position_metrics = {}
         A.addback_plans = {}
         A.build_plans = {}
+        A.build_confirm_plans = {}
         A.trend_add_reasons = {}
         return False
     if not style_exposures:
@@ -1821,6 +1922,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
                 sent = True
         A.addback_plans = {}
         A.build_plans = {}
+        A.build_confirm_plans = {}
         A.entry_scales = {}
         A.trend_add_reasons = {}
         return sent
@@ -1897,6 +1999,7 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         A.intraday_scales.pop(code, None)
         A.addback_plans.pop(code, None)
         A.build_plans.pop(code, None)
+        A.build_confirm_plans.pop(code, None)
         A.entry_scales.pop(code, None)
         A.trend_add_reasons.pop(code, None)
         if _send_order(
@@ -1906,6 +2009,10 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
     for code in list(A.position_meta.keys()):
         if code not in active_codes and code not in A.desired_shares:
             del A.position_meta[code]
+    for plans in (A.addback_plans, A.build_plans, A.build_confirm_plans):
+        for code in list(plans.keys()):
+            if code not in active_codes:
+                plans.pop(code, None)
     return sent
 
 
@@ -1935,7 +2042,7 @@ def _activate_trend_adds(snapshot):
             A.daily_position_metrics.get(code), age,
             plan.get("setup", ""),
         )
-        if signal is None:
+        if signal != "resume":
             continue
         A.entry_scales[code] = 1.0
         A.build_plans.pop(code, None)
@@ -1977,7 +2084,12 @@ def run_intraday_cycle(context, end_time, trade_date):
         return
     positions = _managed_positions(snapshot)
     candidate_map = {item["code"]: item for item in A.target_candidates}
-    codes = sorted(set(positions.keys()) & set(candidate_map.keys()))
+    intraday_codes = (
+        set(candidate_map.keys())
+        | set(A.build_plans.keys())
+        | set(A.build_confirm_plans.keys())
+    )
+    codes = sorted(set(positions.keys()) & intraday_codes)
     if not codes:
         return
     history = fetch_history(
@@ -1988,12 +2100,59 @@ def run_intraday_cycle(context, end_time, trade_date):
     tick_map = _simulation_tick(context, codes)
     execution_prices = _raw_execution_prices(context, codes, "close")
     for code in codes:
-        candidate = candidate_map[code]
-        feature = candidate["feature"]
+        candidate = candidate_map.get(code)
+        feature = (candidate or {}).get("feature", {})
         bars30 = aggregate_5m_to_30m(history.get(code))
+        daily_metrics = A.daily_position_metrics.get(code, feature)
+
+        confirm_plan = A.build_confirm_plans.get(code)
+        if (confirm_plan
+                and str(confirm_plan.get("add_date", "")) != str(trade_date)):
+            support_kind = str(confirm_plan.get("support_kind", ""))
+            support = float((daily_metrics or {}).get(support_kind, 0.0))
+            prior_close = float((daily_metrics or {}).get("close", 0.0))
+            if support > 0.0 and prior_close >= support:
+                print(
+                    "BUILD_CONFIRMED", trade_date, code,
+                    support_kind, round(support, 4), "daily_close",
+                )
+                A.build_confirm_plans.pop(code, None)
+            else:
+                confirmed = first_hour_daily_support_confirmed(
+                    bars30, trade_date, support
+                )
+                if confirmed is True:
+                    print(
+                        "BUILD_CONFIRMED", trade_date, code,
+                        support_kind, round(support, 4), "first_hour",
+                    )
+                    A.build_confirm_plans.pop(code, None)
+                elif confirmed is False:
+                    current = int(positions[code].get("volume", 0))
+                    available = int(positions[code].get("available", 0))
+                    volume = build_add_rollback_volume(
+                        current, available, confirm_plan
+                    )
+                    if volume > 0 and _send_order(
+                            context, "sell", code, volume, trade_date,
+                            "build_add_unconfirmed",
+                            execution_prices.get(code)):
+                        A.desired_shares[code] = max(0, current - volume)
+                        A.entry_scales[code] = STARTER_POSITION_SCALE
+                        A.build_confirm_plans.pop(code, None)
+                    elif current <= int(confirm_plan.get(
+                            "base_volume", current)):
+                        A.entry_scales[code] = STARTER_POSITION_SCALE
+                        A.build_confirm_plans.pop(code, None)
+                    continue
+                else:
+                    continue
+
+        if candidate is None or not daily_metrics:
+            continue
         reduced = float(A.intraday_scales.get(code, 1.0)) < 0.999
         plan = A.addback_plans.get(code)
-        daily_metrics = A.daily_position_metrics.get(code, feature)
+        build_plan = A.build_plans.get(code)
         previous_low = (
             float(bars30.iloc[-2]["low"])
             if len(bars30) >= 2 else 0.0
@@ -2010,6 +2169,13 @@ def run_intraday_cycle(context, end_time, trade_date):
             int((plan or {}).get("age", ADDBACK_WINDOW_DAYS + 1)),
             ma7_add_allowed,
         )
+        build_signal = None
+        if action is None and not reduced and build_plan:
+            build_signal = intraday_build_add_signal(
+                bars30, daily_metrics,
+                int(build_plan.get("age", TREND_ADD_WINDOW_DAYS + 1)),
+                build_plan.get("setup", ""),
+            )
         if action == "reduce":
             current = int(positions[code].get("volume", 0))
             available = int(positions[code].get("available", 0))
@@ -2096,6 +2262,43 @@ def run_intraday_cycle(context, end_time, trade_date):
                     )
             else:
                 A.intraday_scales[code] = previous_scale
+        elif build_signal in ("ma7", "ma13") and build_plan:
+            previous_scale = float(A.entry_scales.get(
+                code, STARTER_POSITION_SCALE
+            ))
+            A.entry_scales[code] = 1.0
+            base_desired = _desired_share_map(
+                snapshot, A.current_style_exposures,
+                A.target_candidates, tick_map, execution_prices,
+            ).get(code, 0)
+            current = int(positions[code].get("volume", 0))
+            missing = int((base_desired - current) / 100.0) * 100
+            price = _execution_price(
+                code, candidate_map, tick_map, "buy", execution_prices
+            )
+            affordable = int(
+                float(snapshot["available_cash"]) * 0.98
+                / max(price, 1e-12) / 100.0
+            ) * 100
+            if missing <= 0:
+                A.build_plans.pop(code, None)
+                continue
+            if price <= 0.0 or affordable < missing:
+                A.entry_scales[code] = previous_scale
+                continue
+            if _send_order(
+                    context, "buy", code, missing, trade_date,
+                    "trend_add_" + build_signal, price):
+                A.desired_shares[code] = current + missing
+                A.build_plans.pop(code, None)
+                A.build_confirm_plans[code] = {
+                    "add_date": str(trade_date),
+                    "base_volume": current,
+                    "added_volume": missing,
+                    "support_kind": build_signal,
+                }
+            else:
+                A.entry_scales[code] = previous_scale
 
 
 def run_daily_cycle(context, asof, trade_date):
@@ -2217,6 +2420,8 @@ def run_daily_cycle(context, asof, trade_date):
     exit_sent = _risk_exits(
         context, snapshot, asof, trade_date, style_exposures
     )
+    # MA7/MA13 starter additions are confirmed intraday. Only the independent
+    # secondary-base resume setup may still complete from a daily signal.
     trend_add_due = _activate_trend_adds(snapshot)
     if trend_add_due:
         tick_map = _simulation_tick(
@@ -2288,6 +2493,7 @@ def init(context):
     A.daily_position_metrics = {}
     A.entry_scales = {}
     A.build_plans = {}
+    A.build_confirm_plans = {}
     A.trend_add_reasons = {}
     A.blocked_codes = set()
     A.owned_codes = set()
