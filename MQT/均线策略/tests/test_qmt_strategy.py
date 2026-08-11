@@ -588,6 +588,32 @@ class StockSelectionTests(unittest.TestCase):
         })
         self.assertEqual(setup, "ma13_rebound")
 
+    def test_bottom_cross_starter_is_only_below_ma13_entry_exception(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 99.8, "low": 98.9, "previous_high": 99.5,
+            "ma7": 99.6, "ma7_prev1": 99.0, "ma7_prev2": 98.5,
+            "ma13": 100.5, "ma13_prev1": 100.6, "ma13_prev": 100.8,
+            "ma40": 96.0, "ma40_prev": 95.9,
+            "ma7_slope3": 0.008, "ma13_slope3": -0.001,
+            "ma40_slope5": 0.001,
+            "distance_ma40": 99.8 / 96.0 - 1.0,
+            "ma7_ma13_gap": 99.6 / 100.5 - 1.0,
+            "ma13_ma40_gap": 100.5 / 96.0 - 1.0,
+        })
+        self.assertEqual(setup, "bottom_cross_starter")
+        self.assertLess(invoke("entry_setup_scale", setup), 0.35)
+
+    def test_bottom_cross_starter_completes_only_after_ma13_reclaim(self):
+        metrics = {
+            "close": 101.0, "ma7": 100.0, "ma13": 100.5,
+            "ma40": 96.0, "ma7_slope3": 0.008,
+            "ma13_slope3": -0.001,
+        }
+        self.assertEqual(
+            invoke("trend_add_signal", metrics, 2, "bottom_cross_starter"),
+            "ma13_reclaim",
+        )
+
     def test_pullback_build_adds_on_recent_high_breakout(self):
         metrics = {
             "close": 106.5, "low": 104.5, "previous_high": 105.0,
@@ -997,12 +1023,26 @@ class RiskAndSizingTests(unittest.TestCase):
         )
         self.assertEqual(reason, "ma40_break")
 
-    def test_failed_rebound_to_ma13_exits_after_prior_break(self):
+    def test_sector_ma40_break_exits_immediately(self):
         reason = invoke(
-            "exit_reason", 99.0, 100.5, 100.0, 95.0, 3.0, 100.0,
+            "exit_reason", 104.0, 105.0, 100.0, 95.0, 3.0, 100.0,
+            0, True, 0.25, sector_ma40_broken=True,
+        )
+        self.assertEqual(reason, "sector_ma40_break")
+
+    def test_no_ma13_rebound_reduces_after_second_break_day(self):
+        reason = invoke(
+            "exit_reason", 99.0, 99.2, 100.0, 95.0, 3.0, 100.0,
             1, True, 0.25,
         )
-        self.assertEqual(reason, "ma13_rebound_failed")
+        self.assertEqual(reason, "ma13_no_rebound_reduce")
+
+    def test_ma13_break_exits_only_after_third_unrecovered_day(self):
+        reason = invoke(
+            "exit_reason", 99.0, 100.2, 100.0, 95.0, 3.0, 100.0,
+            2, True, 0.25,
+        )
+        self.assertEqual(reason, "ma13_break")
 
     def test_target_shares_rounds_down_to_board_lot(self):
         shares = invoke(

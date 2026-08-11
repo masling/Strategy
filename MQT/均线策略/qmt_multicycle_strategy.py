@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.4.2_20260811_PULLBACK_REENTRY
+# DOWNLOAD_BUILD: V2.4.3_20260811_MA13_EXIT_BOTTOM_CROSS
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_2"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_3"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -89,6 +89,13 @@ PULLBACK_MIN_MA13_SLOPE_3D = 0.0005
 PULLBACK_MIN_GAP_RATIO = 0.60
 PULLBACK_MAX_GAP_RATIO = 2.40
 PULLBACK_BREAKOUT_MAX_DISTANCE_MA7 = 0.06
+BOTTOM_CROSS_POSITION_SCALE = 0.25
+BOTTOM_CROSS_MAX_MA7_MA13_GAP = 0.015
+BOTTOM_CROSS_MIN_MA7_SLOPE_3D = 0.004
+BOTTOM_CROSS_MIN_MA13_SLOPE_3D = -0.002
+BOTTOM_CROSS_MAX_DISTANCE_MA40 = 0.10
+MA13_NO_REBOUND_REDUCE_RATIO = 0.50
+MA13_MAX_BREAK_DAYS = 3
 STARTER_MAX_MA7_MA13_GAP = 0.015
 STARTER_MAX_MA13_MA40_GAP = 0.045
 STARTER_MAX_DISTANCE_MA40 = 0.08
@@ -647,6 +654,28 @@ def sector_feature(frame, benchmark_close):
     }
 
 
+def active_sector_ma40_breaks(context, asof, sectors):
+    """Return selected sectors whose current member proxy closes below MA40."""
+    records = [
+        item for item in (sectors or [])
+        if item.get("members") and item.get("member_sector")
+    ]
+    if not records:
+        return set()
+    codes = sorted({code for item in records for code in item["members"]})
+    history = fetch_history(
+        context, ["open", "high", "low", "close", "amount"],
+        codes, "1d", 45, asof, "back_ratio",
+    )
+    broken = set()
+    for item in records:
+        proxy = sector_proxy_frame(history, item["members"], 5)
+        close = _close_values(proxy)
+        if len(close) >= 40 and close[-1] < float(np.mean(close[-40:])):
+            broken.add((item.get("style"), item.get("member_sector")))
+    return broken
+
+
 def fetch_history(context, fields, stock_codes, period, count, end_time,
                   dividend_type="none", chunk_size=200):
     result = {}
@@ -713,11 +742,19 @@ def _is_pullback_setup(setup):
     return str(setup or "") in ("ma7_pullback", "ma13_rebound")
 
 
+def _is_starter_setup(setup):
+    return str(setup or "") in (
+        "ma40_starter", "base_reclaim", "bottom_cross_starter"
+    )
+
+
 def entry_setup_scale(setup):
     """Keep support entries small until their continuation is confirmed."""
     if _is_pullback_setup(setup):
         return PULLBACK_POSITION_SCALE
-    if str(setup or "") in ("ma40_starter", "base_reclaim"):
+    if str(setup or "") == "bottom_cross_starter":
+        return BOTTOM_CROSS_POSITION_SCALE
+    if _is_starter_setup(setup):
         return STARTER_POSITION_SCALE
     return 1.0
 
@@ -744,6 +781,24 @@ def entry_setup_kind(metrics):
     ma7_prev2 = float(metrics.get("ma7_prev2", ma7_prev1 - 1e-12))
     ma13_prev1 = float(metrics.get("ma13_prev1", ma13))
     prior_gap7 = ma7_prev1 / ma13_prev1 - 1.0 if ma13_prev1 > 0.0 else 0.0
+
+    # The only permitted close below MA13: an early bottom turn where MA7 is
+    # rising into MA13.  It is intentionally the smallest initial position;
+    # a later close back over MA13 is required before completing the entry.
+    bottom_cross_starter = bool(
+        ma13 > ma7 >= ma40 > 0.0
+        and close < ma13 and close >= ma7
+        and ma13 / ma7 - 1.0 <= BOTTOM_CROSS_MAX_MA7_MA13_GAP
+        and ma7 > ma7_prev1 >= ma7_prev2
+        and slope7 >= BOTTOM_CROSS_MIN_MA7_SLOPE_3D
+        and slope13 >= BOTTOM_CROSS_MIN_MA13_SLOPE_3D
+        and ma40 >= ma40_prev
+        and low >= ma40 * (1.0 - PULLBACK_SUPPORT_TOLERANCE)
+        and close > previous_high
+        and distance40 <= BOTTOM_CROSS_MAX_DISTANCE_MA40
+    )
+    if bottom_cross_starter:
+        return "bottom_cross_starter"
 
     # A strong trend can be entered on a controlled MA7 pullback.  This is
     # deliberately a small first position: the later break of the recent high
@@ -1314,9 +1369,7 @@ def entry_candidate_status(candidate, min_score=ENTRY_MIN_SCORE):
     if not bool(feature.get("selection_eligible", True)):
         return "STRENGTH_WAIT"
     setup = str(feature.get("entry_setup", ""))
-    is_starter = setup in (
-        "ma40_starter", "base_reclaim", "ma7_pullback", "ma13_rebound"
-    )
+    is_starter = _is_starter_setup(setup) or _is_pullback_setup(setup)
     maximum_strength = (
         STARTER_MAX_STRENGTH_SCORE
         if is_starter else ENTRY_MAX_STRENGTH_SCORE
@@ -1400,18 +1453,22 @@ def board_allowed(code, allow_chinext=True, allow_star=False, allow_bse=False):
 
 
 def exit_reason(close, high, ma13, ma40, atr, entry_price,
-                prior_below_ma13_days, still_selected, style_exposure):
+                prior_below_ma13_days, still_selected, style_exposure,
+                ma13_reduced=False, sector_ma40_broken=False):
     if style_exposure <= 0.0:
         return "style_risk"
+    if sector_ma40_broken:
+        return "sector_ma40_break"
     if atr > 0 and close <= entry_price - 2.0 * atr:
         return "initial_stop"
     if close < ma40:
         return "ma40_break"
-    if (prior_below_ma13_days >= 1 and close < ma13
-            and high >= ma13 * 0.995):
-        return "ma13_rebound_failed"
-    if close < ma13 and prior_below_ma13_days + 1 >= 3:
+    below_days = int(prior_below_ma13_days) + 1
+    if close < ma13 and below_days >= MA13_MAX_BREAK_DAYS:
         return "ma13_break"
+    if (close < ma13 and below_days >= 2 and not ma13_reduced
+            and high < ma13 * 0.995):
+        return "ma13_no_rebound_reduce"
     if not still_selected:
         return "sector_rotation"
     return None
@@ -1565,6 +1622,16 @@ def trend_add_signal(metrics, age, setup=""):
     ma13 = float(metrics.get("ma13", 0.0))
     ma40 = float(metrics.get("ma40", 0.0))
     close = float(metrics.get("close", 0.0))
+    if str(setup) == "bottom_cross_starter":
+        if (ma13 > ma7 > ma40 > 0.0
+                and close > ma13
+                and float(metrics.get("ma7_slope3", 0.0))
+                >= BOTTOM_CROSS_MIN_MA7_SLOPE_3D
+                and float(metrics.get("ma13_slope3", 0.0))
+                >= BOTTOM_CROSS_MIN_MA13_SLOPE_3D
+                and close / ma7 - 1.0
+                <= PULLBACK_BREAKOUT_MAX_DISTANCE_MA7):
+            return "ma13_reclaim"
     if not (ma7 > ma13 > ma40 > 0.0):
         return None
     if float(metrics.get("ma7_slope3", 0.0)) < ENTRY_MIN_MA7_SLOPE_3D:
@@ -2703,7 +2770,7 @@ def entry_max_execution_price(candidate):
         return 0.0
     max_distance = (
         STARTER_MAX_DISTANCE_MA7
-        if setup in ("ma40_starter", "base_reclaim")
+        if _is_starter_setup(setup)
         else PULLBACK_MAX_DISTANCE_MA7
         if _is_pullback_setup(setup)
         else ENTRY_MAX_DISTANCE_MA7
@@ -3115,7 +3182,9 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
             meta = {
                 "entry_price": entry,
                 "below_ma13_days": 0,
+                "ma13_reduced": False,
                 "style": None,
+                "sector": None,
             }
         elif float(position.get("open_price", 0.0)) > 0.0:
             meta["entry_price"] = float(position["open_price"])
@@ -3125,23 +3194,53 @@ def _risk_exits(context, snapshot, asof, trade_date, style_exposures):
         )
         if candidate is not None:
             meta["style"] = candidate.get("style")
+            meta["sector"] = candidate.get("sector")
         still_selected = (
             int(A.desired_shares.get(code, 0)) > 0
             and code not in A.blocked_codes
         )
         prior_below_days = int(meta.get("below_ma13_days", 0))
         style_exposure = float(style_exposures.get(meta.get("style"), 0.0))
+        sector_ma40_broken = (
+            (meta.get("style"), meta.get("sector"))
+            in getattr(A, "sector_ma40_broken", set())
+        )
         reason = exit_reason(
             metrics["close"], metrics["high"], metrics["ma13"],
             metrics["ma40"], metrics["atr"], meta["entry_price"],
             prior_below_days, still_selected, style_exposure,
+            bool(meta.get("ma13_reduced", False)),
+            sector_ma40_broken,
         )
         if metrics["close"] < metrics["ma13"]:
             meta["below_ma13_days"] = prior_below_days + 1
         else:
             meta["below_ma13_days"] = 0
+            meta["ma13_reduced"] = False
         A.position_meta[code] = meta
         if reason is None:
+            continue
+        if reason == "ma13_no_rebound_reduce":
+            current = int(position.get("volume", 0))
+            volume = int(
+                current * MA13_NO_REBOUND_REDUCE_RATIO / 100.0
+            ) * 100
+            volume = min(volume, int(position.get("available", 0)))
+            if volume < 100:
+                continue
+            remaining = max(0, current - volume)
+            A.desired_shares[code] = remaining
+            A.intraday_scales[code] = float(remaining) / max(current, 1)
+            meta["ma13_reduced"] = True
+            A.position_meta[code] = meta
+            A.addback_plans.pop(code, None)
+            A.build_plans.pop(code, None)
+            A.build_confirm_plans.pop(code, None)
+            A.trend_add_reasons.pop(code, None)
+            if _send_order(
+                    context, "sell", code, volume, trade_date, reason,
+                    A.execution_prices.get(code)):
+                sent = True
             continue
         A.desired_shares[code] = 0
         A.blocked_codes.add(code)
@@ -3191,7 +3290,7 @@ def _activate_trend_adds(snapshot):
             A.daily_position_metrics.get(code), age,
             plan.get("setup", ""),
         )
-        if signal != "resume":
+        if signal not in ("resume", "breakout", "ma13_reclaim"):
             continue
         A.entry_scales[code] = 1.0
         A.build_plans.pop(code, None)
@@ -3592,6 +3691,7 @@ def run_daily_cycle(context, asof, trade_date):
         A.reserve_candidates = []
         A.spectator_candidates = []
         A.entry_ready_codes = set()
+        A.active_sectors = []
         A.desired_shares = {
             code: 0 for code in _managed_positions(snapshot).keys()
         }
@@ -3640,6 +3740,7 @@ def run_daily_cycle(context, asof, trade_date):
             regimes=market.get("regimes", {}),
         )
         A.base_style_exposures = dict(base_style_exposures)
+        A.active_sectors = list(selected_sectors)
         style_exposures = apply_style_risk_caps(
             base_style_exposures, market.get("risk_caps", {})
         )
@@ -3802,11 +3903,17 @@ def run_daily_cycle(context, asof, trade_date):
             "unallocated_cash", allocation["unallocated_cash"],
         )
 
+    A.sector_ma40_broken = active_sector_ma40_breaks(
+        context, asof, getattr(A, "active_sectors", [])
+    ) if _managed_positions(snapshot) else set()
+    if A.sector_ma40_broken:
+        print("SECTOR_MA40_BREAK", trade_date,
+              sorted(A.sector_ma40_broken))
     exit_sent = _risk_exits(
         context, snapshot, asof, trade_date, style_exposures
     )
-    # MA7/MA13 starter additions are confirmed intraday. Only the independent
-    # secondary-base resume setup may still complete from a daily signal.
+    # Support entries add intraday; a fresh MA13 reclaim or high breakout can
+    # complete the remaining position from its completed daily signal.
     trend_add_due = _activate_trend_adds(snapshot)
     if trend_add_due:
         tick_map = _simulation_tick(
@@ -3884,6 +3991,8 @@ def init(context):
     A.target_candidates = []
     A.reserve_candidates = []
     A.spectator_candidates = []
+    A.active_sectors = []
+    A.sector_ma40_broken = set()
     A.entry_ready_codes = set()
     A.desired_shares = {}
     A.position_meta = {}

@@ -1,4 +1,4 @@
-# QMT 多风格 7/13/40 均线轮动策略 v2.4.2
+# QMT 多风格 7/13/40 均线轮动策略 v2.4.3
 
 发布日期：2026-08-11
 
@@ -272,6 +272,8 @@ QMT“模拟信号模式”只记录信号。需要模拟柜台实际接收委�
 | `PULLBACK_POSITION_SCALE` | 0.35 | MA7/MA13回踩确认的首次建仓比例；突破近十日高点后再补足 |
 | `PULLBACK_MIN_COMPOSITE_SCORE` | 55 | 回踩类小仓信号的最低综合分，避免强度排名轻微下滑时错过支撑买点 |
 | `PULLBACK_MAX_DISTANCE_MA7` / `PULLBACK_MAX_DISTANCE_MA40` | 0.04 / 0.15 | 回踩入场相对MA7、MA40的最大乖离，禁止回升后追价 |
+| `BOTTOM_CROSS_POSITION_SCALE` | 0.25 | 仅限MA7即将上穿MA13的底部试仓；收盘重新站上MA13后才补足 |
+| `MA13_NO_REBOUND_REDUCE_RATIO` / `MA13_MAX_BREAK_DAYS` | 0.50 / 3 | 收盘跌破MA13满两日且无反弹先减半；连续三日未收回则清仓 |
 | `TREND_ADD_WINDOW_DAYS` | 15 | 启动仓等待MA13趋势加仓的最长交易日数 |
 | `INTRADAY_STAND_TOLERANCE` | 0.005 | 30分钟站稳日线支撑时允许的盘中最大假跌破 |
 | `MA7_ADD_MIN_PULLBACK` | 0.06 | 允许MA7加仓前的最小高点回撤 |
@@ -282,6 +284,8 @@ QMT“模拟信号模式”只记录信号。需要模拟柜台实际接收委�
 | `ADDBACK_WINDOW_DAYS` | 3 | 顶部减仓后允许分阶段回补的交易日数 |
 | `MIN_AVERAGE_AMOUNT` | 50000000 | 20日平均成交额下限，单位元 |
 | `MIN_LIQUIDITY_SAMPLE_DAYS` | 10 | 排除停牌和涨跌停后，20日窗口所需的最少正常交易日 |
+
+个股收盘跌破 MA40、或持仓所属的申万行业成员代理跌破 MA40，均在日线风险检查中全额退出。
 
 ## 已知限制
 
