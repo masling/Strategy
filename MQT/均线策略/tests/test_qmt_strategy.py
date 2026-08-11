@@ -383,6 +383,22 @@ class StockSelectionTests(unittest.TestCase):
         })
         self.assertIsNone(invoke("stock_feature", frame, 0.01, 0.03))
 
+    def test_daily_refresh_preserves_softly_ineligible_reserve_name(self):
+        close = np.concatenate([np.linspace(60.0, 80.0, 110),
+                                np.linspace(82.0, 125.0, 20)])
+        frame = pd.DataFrame({
+            "close": close, "high": close * 1.01, "low": close * 0.99,
+            "amount": np.repeat(100000000.0, len(close)),
+            "volume": np.repeat(1000000.0, len(close)),
+            "suspendFlag": np.zeros(len(close)),
+        })
+        feature = invoke(
+            "stock_feature", frame, 0.01, 0.03,
+            50000000.0, False, "000001.SZ", False,
+        )
+        self.assertIsNotNone(feature)
+        self.assertFalse(feature["selection_eligible"])
+
     def test_trend_entry_rejects_price_more_than_four_percent_above_ma7(self):
         setup = invoke("entry_setup_kind", {
             "close": 108.0, "low": 105.0, "previous_high": 107.0,
@@ -623,17 +639,30 @@ class StockSelectionTests(unittest.TestCase):
         selected = invoke("select_stocks", candidates, 6, 2) or []
         self.assertEqual([item["code"] for item in selected], ["A", "B", "D"])
 
-    def test_cross_sectional_stock_score_prefers_stronger_liquid_name(self):
+    def test_cross_sectional_stock_score_prefers_better_entry_timing(self):
         candidates = [
             {"code": "A", "sector": "S1", "feature": {
                 "rs13": 0.10, "rs40": 0.20, "r13": 0.15,
                 "high_proximity": 0.98, "average_amount": 200000000.0,
-                "volatility": 0.01,
+                "volatility": 0.01, "amount_ratio5": 1.0,
+                "close": 10.2, "low": 9.95, "ma7": 10.1,
+                "ma13": 10.0, "ma40": 9.3,
+                "distance_ma40": 10.2 / 9.3 - 1.0,
+                "distance_ma13": 0.02, "ma7_ma13_gap": 0.01,
+                "ma13_ma40_gap": 10.0 / 9.3 - 1.0,
+                "ma7_slope3": 0.01, "ma13_slope3": 0.006,
             }},
             {"code": "B", "sector": "S2", "feature": {
                 "rs13": 0.02, "rs40": 0.04, "r13": 0.05,
                 "high_proximity": 0.90, "average_amount": 60000000.0,
-                "volatility": 0.03,
+                "volatility": 0.03, "amount_ratio5": 1.0,
+                "close": 12.0, "low": 11.7, "ma7": 10.0,
+                "ma13": 9.8, "ma40": 9.0,
+                "distance_ma40": 12.0 / 9.0 - 1.0,
+                "distance_ma13": 12.0 / 9.8 - 1.0,
+                "ma7_ma13_gap": 10.0 / 9.8 - 1.0,
+                "ma13_ma40_gap": 9.8 / 9.0 - 1.0,
+                "ma7_slope3": 0.02, "ma13_slope3": 0.012,
             }},
         ]
         scored = invoke("score_stock_candidates", candidates) or []
@@ -649,7 +678,9 @@ class StockSelectionTests(unittest.TestCase):
                  "volatility": 0.01, "distance_ma40": 0.08,
                  "distance_ma13": 0.02, "ma7_ma13_gap": 0.02,
                  "ma13_ma40_gap": 0.08, "ma7_slope3": 0.012,
-                 "ma13_slope3": 0.008,
+                 "ma13_slope3": 0.008, "amount_ratio5": 1.0,
+                 "close": 10.2, "low": 9.95, "ma7": 10.1,
+                 "ma13": 10.0, "ma40": 9.3,
              }},
             {"code": "B", "style": "S1", "score": 99.0,
              "sector": "Y", "feature": {
@@ -658,7 +689,9 @@ class StockSelectionTests(unittest.TestCase):
                  "volatility": 0.04, "distance_ma40": 0.20,
                  "distance_ma13": 0.10, "ma7_ma13_gap": 0.07,
                  "ma13_ma40_gap": 0.03, "ma7_slope3": 0.002,
-                 "ma13_slope3": 0.001,
+                 "ma13_slope3": 0.001, "amount_ratio5": 1.0,
+                 "close": 12.0, "low": 11.7, "ma7": 10.0,
+                 "ma13": 9.8, "ma40": 9.0,
              }},
         ]
         rescored = invoke(
@@ -672,8 +705,8 @@ class StockSelectionTests(unittest.TestCase):
             "entry_setup": "trend", "raw_signal_close": 10.0,
             "amount_ratio5": 1.0,
         }}
-        low = dict(base, entry_score=64.99)
-        ready = dict(base, entry_score=65.0)
+        low = dict(base, entry_score=64.99, strength_score=70.0, score=80.0)
+        ready = dict(base, entry_score=65.0, strength_score=70.0, score=65.0)
         wait = {"score": 90.0, "feature": {
             "entry_setup": None, "raw_signal_close": 10.0,
             "amount_ratio5": 1.0,
@@ -683,6 +716,39 @@ class StockSelectionTests(unittest.TestCase):
         )
         self.assertEqual(invoke("entry_candidate_status", ready), "READY")
         self.assertEqual(invoke("entry_candidate_status", wait), "WAIT")
+
+    def test_entry_strength_fit_peaks_near_seventy(self):
+        self.assertEqual(invoke("entry_strength_fit_score", 70.0), 100.0)
+        self.assertGreater(
+            invoke("entry_strength_fit_score", 70.0),
+            invoke("entry_strength_fit_score", 60.0),
+        )
+        self.assertGreater(
+            invoke("entry_strength_fit_score", 70.0),
+            invoke("entry_strength_fit_score", 80.0),
+        )
+        self.assertEqual(
+            invoke("entry_strength_fit_score", 60.0),
+            invoke("entry_strength_fit_score", 80.0),
+        )
+        self.assertEqual(invoke("entry_strength_fit_score", 95.0), 0.0)
+
+    def test_entry_rejects_overpowered_or_lagging_strength(self):
+        base = {
+            "score": 80.0, "entry_score": 80.0,
+            "feature": {
+                "entry_setup": "trend", "raw_signal_close": 10.0,
+                "amount_ratio5": 1.0,
+            },
+        }
+        lagging = dict(base, strength_score=30.0)
+        overpowered = dict(base, strength_score=95.0)
+        self.assertEqual(
+            invoke("entry_candidate_status", lagging), "LOW_STRENGTH"
+        )
+        self.assertEqual(
+            invoke("entry_candidate_status", overpowered), "OVERPOWERED"
+        )
 
     def test_entry_score_penalizes_overextended_strong_stock(self):
         near = {
@@ -720,6 +786,29 @@ class StockSelectionTests(unittest.TestCase):
         self.assertEqual(
             invoke("participation_wait_reason", feature), "VOLUME_WAIT"
         )
+
+    def test_overextended_names_do_not_occupy_actionable_watch_slots(self):
+        candidates = []
+        for index in range(14):
+            status = "OVEREXTENDED" if index < 8 else "WAIT"
+            candidates.append({
+                "code": "C%02d" % index, "style": "S1", "sector": "X",
+                "score": 100.0 - index,
+                "strength_score": 80.0 - index,
+                "strength_fit_score": 70.0,
+                "entry_score": 80.0 - index,
+                "entry_status": status,
+            })
+        selected, spectators = invoke(
+            "select_actionable_watch_candidates", candidates
+        )
+        self.assertEqual(len(selected), 4)
+        self.assertTrue(all(
+            item["entry_status"] != "OVEREXTENDED" for item in selected
+        ))
+        self.assertTrue(all(
+            item["entry_status"] == "OVEREXTENDED" for item in spectators
+        ))
 
     def test_board_filter_defaults_can_exclude_star_and_bse(self):
         self.assertFalse(invoke("board_allowed", "688001.SH", True, False, False))
@@ -870,6 +959,59 @@ class RiskAndSizingTests(unittest.TestCase):
         self.assertIn("HELD", desired)
         self.assertIn("READY", desired)
         self.assertNotIn("WAIT", desired)
+
+    def test_sticky_sizing_does_not_resize_held_name_for_new_signal(self):
+        strategy.A.blocked_codes = set()
+        strategy.A.intraday_scales = {}
+        strategy.A.entry_scales = {}
+        snapshot = {
+            "balance": 1000000.0,
+            "positions": {"HELD": {"volume": 10000}},
+        }
+        candidates = [
+            {"code": "HELD", "style": "S1", "score": 70.0,
+             "entry_ready": False, "feature": {"close": 10.0}},
+            {"code": "READY", "style": "S1", "score": 80.0,
+             "entry_ready": True, "feature": {"close": 10.0}},
+        ]
+        desired = invoke(
+            "_sticky_desired_share_map", snapshot, {"S1": 0.30},
+            candidates, {}, {"HELD": 10.0, "READY": 10.0}, False,
+        ) or {}
+        self.assertEqual(desired["HELD"], 10000)
+        self.assertGreater(desired.get("READY", 0), 0)
+
+    def test_sticky_sizing_reduces_only_after_meaningful_risk_drop(self):
+        self.assertFalse(invoke(
+            "meaningful_style_reduction", {"S1": 0.25}, {"S1": 0.24}
+        ))
+        self.assertTrue(invoke(
+            "meaningful_style_reduction", {"S1": 0.25}, {"S1": 0.20}
+        ))
+        reference = invoke(
+            "updated_sizing_style_reference",
+            {"S1": 0.25}, {"S1": 0.24}, False,
+        )
+        self.assertEqual(reference, {"S1": 0.25})
+        self.assertTrue(invoke(
+            "meaningful_style_reduction", reference, {"S1": 0.21}
+        ))
+        strategy.A.blocked_codes = set()
+        strategy.A.intraday_scales = {}
+        strategy.A.entry_scales = {}
+        snapshot = {
+            "balance": 1000000.0,
+            "positions": {"HELD": {"volume": 10000}},
+        }
+        candidates = [{
+            "code": "HELD", "style": "S1", "score": 70.0,
+            "entry_ready": False, "feature": {"close": 10.0},
+        }]
+        desired = invoke(
+            "_sticky_desired_share_map", snapshot, {"S1": 0.05},
+            candidates, {}, {"HELD": 10.0}, True,
+        ) or {}
+        self.assertEqual(desired["HELD"], 5000)
 
     def test_new_entry_execution_price_must_remain_near_ma7(self):
         candidate = {"feature": {

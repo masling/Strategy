@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.1.1_20260811_FIX_LIQUIDITY_AMOUNT_ARRAY
+# DOWNLOAD_BUILD: V2.2.0_20260811_ACTIONABLE_RESERVE_STICKY_HOLDINGS
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_1_1"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_2_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -16,6 +16,9 @@ MAX_SECTORS_PER_STYLE = 3
 MAX_STOCKS_PER_STYLE = 4
 STOCK_CANDIDATE_POOL_PER_STYLE = 12
 MAX_PER_SECTOR = 4
+STOCK_RESERVE_POOL_PER_STYLE = 30
+RESERVE_MAX_PER_SECTOR = 10
+SPECTATOR_LOG_PER_STYLE = 4
 MAX_STOCK_WEIGHT = 0.15
 MIN_AVERAGE_AMOUNT = 50000000.0
 MIN_LIQUIDITY_SAMPLE_DAYS = 10
@@ -39,6 +42,13 @@ WATCHLIST_MAX_DISTANCE_MA40 = 0.25
 WATCHLIST_MIN_MA13_SLOPE_3D = -0.003
 WATCHLIST_MIN_HIGH_PROXIMITY = 0.80
 ENTRY_MIN_SCORE = 65.0
+ENTRY_MIN_STRENGTH_SCORE = 35.0
+ENTRY_MAX_STRENGTH_SCORE = 90.0
+ENTRY_MIN_COMPOSITE_SCORE = 65.0
+STARTER_MIN_STRENGTH_SCORE = 25.0
+STARTER_MAX_STRENGTH_SCORE = 92.0
+STARTER_MIN_COMPOSITE_SCORE = 60.0
+STYLE_REDUCTION_DEADBAND = 0.03
 ENTRY_MAX_DISTANCE_MA40 = 0.15
 ENTRY_MAX_DISTANCE_MA7 = 0.04
 ENTRY_MAX_MA7_MA13_GAP = 0.035
@@ -658,7 +668,8 @@ def effective_amount_metrics(data, code=""):
 
 def stock_feature(frame, sector_return13, sector_return40,
                   min_average_amount=50000000.0,
-                  require_entry_setup=True, code=""):
+                  require_entry_setup=True, code="",
+                  enforce_selection=True):
     required = ["close", "high", "low", "amount", "volume"]
     if frame is None or len(frame) < 45:
         return None
@@ -723,27 +734,28 @@ def stock_feature(frame, sector_return13, sector_return40,
     if (liquidity_days20 < MIN_LIQUIDITY_SAMPLE_DAYS
             or average_amount < float(min_average_amount)):
         return None
-    if require_entry_setup:
-        if entry_setup is None:
-            return None
-        if not (-0.08 <= r5 <= 0.15):
-            return None
-        if not (0.0 <= distance_ma13 <= 0.12):
-            return None
-        if high_proximity < 0.85:
-            return None
-    else:
-        if not (
-                close[-1] > ma40 > ma40_prev
-                and ma13 > ma40
-                and ma13_slope3 >= WATCHLIST_MIN_MA13_SLOPE_3D
-                and distance_ma40 <= WATCHLIST_MAX_DISTANCE_MA40
-                and high_proximity >= WATCHLIST_MIN_HIGH_PROXIMITY
-                and -0.12 <= r5 <= 0.20):
-            return None
     rs13 = r13 - float(sector_return13)
     rs40 = r40 - float(sector_return40)
-    if rs13 <= 0.0 or rs40 <= 0.0:
+    if require_entry_setup:
+        structure_eligible = bool(
+            entry_setup is not None
+            and -0.08 <= r5 <= 0.15
+            and 0.0 <= distance_ma13 <= 0.12
+            and high_proximity >= 0.85
+        )
+    else:
+        structure_eligible = bool(
+            close[-1] > ma40 > ma40_prev
+            and ma13 > ma40
+            and ma13_slope3 >= WATCHLIST_MIN_MA13_SLOPE_3D
+            and distance_ma40 <= WATCHLIST_MAX_DISTANCE_MA40
+            and high_proximity >= WATCHLIST_MIN_HIGH_PROXIMITY
+            and -0.12 <= r5 <= 0.20
+        )
+    selection_eligible = bool(
+        structure_eligible and rs13 > 0.0 and rs40 > 0.0
+    )
+    if enforce_selection and not selection_eligible:
         return None
 
     returns = np.diff(close[-14:]) / close[-14:-1]
@@ -767,6 +779,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "ma7_slope3": ma7_slope3,
         "ma13_slope3": ma13_slope3,
         "entry_setup": entry_setup,
+        "selection_eligible": selection_eligible,
         "high_proximity": high_proximity,
         "recent_peak_price": recent_peak_price,
         "average_amount": average_amount,
@@ -864,8 +877,11 @@ def position_metrics_in_raw_coordinate(metrics, raw_close):
     return converted
 
 
-def select_stocks(candidates, max_count=6, max_per_sector=2):
-    ordered = sorted(candidates, key=lambda item: item["score"], reverse=True)
+def select_stocks(candidates, max_count=6, max_per_sector=2,
+                  preserve_order=False):
+    ordered = list(candidates) if preserve_order else sorted(
+        candidates, key=lambda item: item["score"], reverse=True
+    )
     selected = []
     sector_counts = {}
     used_codes = set()
@@ -906,6 +922,14 @@ def entry_structure_score(feature):
 
 def _distance_proximity(distance, maximum):
     return max(0.0, 1.0 - abs(float(distance)) / float(maximum))
+
+
+def entry_strength_fit_score(strength, optimum=70.0, half_width=20.0):
+    strength = float(strength)
+    optimum = float(optimum)
+    half_width = max(float(half_width), 1e-12)
+    fit = 1.0 - abs(strength - optimum) / half_width
+    return round(max(0.0, min(100.0, fit * 100.0)), 4)
 
 
 def entry_opportunity_score(feature):
@@ -1029,10 +1053,12 @@ def score_stock_candidates(candidates):
         )
         strength_score = strength_score / 85.0 * 100.0
         entry_score = entry_opportunity_score(item["feature"])
-        score = 0.65 * strength_score + 0.35 * entry_score
+        strength_fit = entry_strength_fit_score(strength_score)
+        score = 0.30 * strength_fit + 0.70 * entry_score
         result = dict(item)
         result["score"] = round(score, 4)
         result["strength_score"] = round(strength_score, 4)
+        result["strength_fit_score"] = strength_fit
         result["entry_score"] = round(entry_score, 4)
         result["entry_structure_score"] = structure
         scored.append(result)
@@ -1060,12 +1086,75 @@ def entry_candidate_status(candidate, min_score=ENTRY_MIN_SCORE):
     wait_reason = participation_wait_reason(feature)
     if wait_reason:
         return wait_reason
+    if not bool(feature.get("selection_eligible", True)):
+        return "STRENGTH_WAIT"
+    setup = str(feature.get("entry_setup", ""))
+    is_starter = setup in ("ma40_starter", "base_reclaim")
+    maximum_strength = (
+        STARTER_MAX_STRENGTH_SCORE
+        if is_starter else ENTRY_MAX_STRENGTH_SCORE
+    )
+    if float((candidate or {}).get("strength_score", 0.0)) > maximum_strength:
+        return "OVERPOWERED"
     if (not feature.get("entry_setup")
             or float(feature.get("raw_signal_close", 0.0)) <= 0.0):
         return "WAIT"
     if float((candidate or {}).get("entry_score", 0.0)) < float(min_score):
         return "LOW_ENTRY_SCORE"
+    minimum_strength = (
+        STARTER_MIN_STRENGTH_SCORE
+        if is_starter else ENTRY_MIN_STRENGTH_SCORE
+    )
+    minimum_composite = (
+        STARTER_MIN_COMPOSITE_SCORE
+        if is_starter else ENTRY_MIN_COMPOSITE_SCORE
+    )
+    if float((candidate or {}).get("strength_score", 0.0)) < minimum_strength:
+        return "LOW_STRENGTH"
+    if float((candidate or {}).get("score", 0.0)) < minimum_composite:
+        return "LOW_COMPOSITE"
     return "READY"
+
+
+def select_actionable_watch_candidates(candidates):
+    selected = []
+    spectators = []
+    grouped = {}
+    for item in candidates or []:
+        grouped.setdefault(item.get("style"), []).append(item)
+    for style_items in grouped.values():
+        actionable = [
+            item for item in style_items
+            if item.get("entry_status") not in (
+                "OVEREXTENDED", "OVERPOWERED", "VOLUME_WAIT",
+                "STRENGTH_WAIT",
+            )
+        ]
+        actionable.sort(
+            key=lambda item: (
+                0 if item.get("entry_status") == "READY" else 1,
+                -(0.70 * float(item.get("entry_score", 0.0))
+                  + 0.30 * float(item.get("strength_fit_score", 0.0))),
+            )
+        )
+        selected.extend(select_stocks(
+            actionable,
+            STOCK_CANDIDATE_POOL_PER_STYLE,
+            MAX_PER_SECTOR,
+            preserve_order=True,
+        ))
+        style_spectators = [
+            item for item in style_items
+            if item.get("entry_status") in (
+                "OVEREXTENDED", "OVERPOWERED", "VOLUME_WAIT"
+            )
+        ]
+        style_spectators.sort(
+            key=lambda item: float(item.get("strength_score", 0.0)),
+            reverse=True,
+        )
+        spectators.extend(style_spectators[:SPECTATOR_LOG_PER_STYLE])
+    return selected, spectators
 
 
 def board_allowed(code, allow_chinext=True, allow_star=False, allow_bse=False):
@@ -1625,15 +1714,15 @@ def _stock_selection(context, asof, sectors):
             "sector_return40": sector_feature_data["return40"],
             "feature": feature,
         })
-    selected = select_stocks(
+    reserve = select_stocks(
         score_stock_candidates(candidates),
-        STOCK_CANDIDATE_POOL_PER_STYLE, MAX_PER_SECTOR
+        STOCK_RESERVE_POOL_PER_STYLE, RESERVE_MAX_PER_SECTOR
     )
     raw_history = fetch_history(
-        context, ["close"], [item["code"] for item in selected],
+        context, ["close"], [item["code"] for item in reserve],
         "1d", 1, asof, "none",
     )
-    for item in selected:
+    for item in reserve:
         raw_frame = raw_history.get(item["code"])
         raw_close = latest_positive_close(raw_frame)
         item["feature"]["raw_signal_close"] = raw_close
@@ -1652,7 +1741,7 @@ def _stock_selection(context, asof, sectors):
                     ),
                 )
                 A.price_coordinate_probe_logged = True
-    return selected
+    return reserve
 
 
 def retain_held_watch_candidates(candidates, previous_candidates,
@@ -1697,6 +1786,8 @@ def _refresh_watch_entry_signals(context, asof, candidates):
     )
     refreshed = []
     for item in candidates:
+        if _is_st_on(context, item["code"], asof):
+            continue
         updated = dict(item)
         feature = stock_feature(
             history.get(item["code"]),
@@ -1705,6 +1796,7 @@ def _refresh_watch_entry_signals(context, asof, candidates):
             MIN_AVERAGE_AMOUNT,
             False,
             item["code"],
+            False,
         )
         raw_close = latest_positive_close(raw_history.get(item["code"]))
         if feature is None:
@@ -2452,6 +2544,109 @@ def _desired_share_map(snapshot, style_exposures, candidates, tick_map,
     return desired
 
 
+def meaningful_style_reduction(previous, current,
+                               deadband=STYLE_REDUCTION_DEADBAND):
+    previous = dict(previous or {})
+    current = dict(current or {})
+    return any(
+        float(old_value) > 0.0
+        and (
+            float(current.get(style, 0.0)) <= 0.0
+            or float(old_value) - float(current.get(style, 0.0))
+            >= float(deadband)
+        )
+        for style, old_value in previous.items()
+    )
+
+
+def updated_sizing_style_reference(previous, current, reduction_applied):
+    previous = dict(previous or {})
+    current = dict(current or {})
+    if not previous or reduction_applied:
+        return current
+    return {
+        style: max(float(value), float(previous.get(style, 0.0)))
+        for style, value in current.items()
+    }
+
+
+def _sticky_desired_share_map(snapshot, style_exposures, candidates,
+                              tick_map, execution_prices=None,
+                              allow_reduction=False):
+    fresh = _desired_share_map(
+        snapshot, style_exposures, candidates, tick_map, execution_prices
+    )
+    positions = snapshot.get("positions", {}) or {}
+    held_codes = {
+        code for code, position in positions.items()
+        if int(position.get("volume", 0)) > 0
+    }
+    if not held_codes:
+        return fresh
+
+    candidate_map = {item["code"]: item for item in candidates or []}
+    prices = dict(execution_prices or {})
+    held_fresh = {}
+    if allow_reduction:
+        held_fresh = _desired_share_map(
+            snapshot, style_exposures,
+            [item for item in candidates or []
+             if item.get("code") in held_codes],
+            tick_map, execution_prices,
+        )
+    result = {}
+    used_value_by_style = {}
+    for code in sorted(held_codes):
+        current = int(positions.get(code, {}).get("volume", 0))
+        candidate = candidate_map.get(code)
+        style = (candidate or {}).get("style")
+        if candidate is None or float(style_exposures.get(style, 0.0)) <= 0.0:
+            result[code] = 0
+            continue
+        if allow_reduction:
+            desired = min(current, int(held_fresh.get(code, 0)))
+        else:
+            desired = current
+        result[code] = desired
+        price = float(prices.get(code, 0.0))
+        used_value_by_style[style] = (
+            used_value_by_style.get(style, 0.0) + desired * price
+        )
+
+    total_asset = float(snapshot.get("balance", 0.0))
+    remaining_by_style = {
+        style: max(
+            0.0,
+            total_asset * float(exposure)
+            - used_value_by_style.get(style, 0.0),
+        )
+        for style, exposure in (style_exposures or {}).items()
+    }
+    ordered_new = sorted(
+        [
+            item for item in candidates or []
+            if item.get("code") not in held_codes
+            and int(fresh.get(item.get("code"), 0)) > 0
+        ],
+        key=lambda item: float(item.get("score", 0.0)),
+        reverse=True,
+    )
+    for item in ordered_new:
+        code = item["code"]
+        style = item.get("style")
+        price = float(prices.get(code, 0.0))
+        remaining = float(remaining_by_style.get(style, 0.0))
+        if price <= 0.0 or remaining <= 0.0:
+            continue
+        maximum = int(remaining / price / 100.0) * 100
+        shares = min(int(fresh.get(code, 0)), maximum)
+        if shares <= 0:
+            continue
+        result[code] = shares
+        remaining_by_style[style] = remaining - shares * price
+    return result
+
+
 def allocation_metrics(total_asset, style_exposures, desired_shares,
                        candidates, execution_prices=None):
     total = float(total_asset)
@@ -2773,7 +2968,11 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
             for code, record in market.get("regimes", {}).items()
         },
         "risk_caps", market.get("risk_caps", {}),
+        "reserve", len(getattr(A, "reserve_candidates", []) or []),
         "watchlist", len(candidates or []),
+        "spectators", len(
+            getattr(A, "spectator_candidates", []) or []
+        ),
         "entry_ready", len([
             item for item in candidates or []
             if item.get("entry_ready") and not item.get("held")
@@ -2790,6 +2989,7 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
             "WATCHLIST",
             [(item["style"], item["code"], item.get("name", ""),
               item["score"], item.get("strength_score", 0.0),
+              item.get("strength_fit_score", 0.0),
               item.get("entry_score", 0.0),
               "HELD" if item.get("held") else item.get(
                   "entry_status", "WAIT"))
@@ -2801,11 +3001,23 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
         ]
     else:
         ready = []
+    spectators = list(getattr(A, "spectator_candidates", []) or [])
+    if sectors and spectators:
+        print(
+            "SPECTATORS",
+            [(item["style"], item["code"], item.get("name", ""),
+              item.get("strength_score", 0.0),
+              item.get("strength_fit_score", 0.0),
+              item.get("entry_score", 0.0),
+              item.get("entry_status", "WAIT"))
+             for item in spectators],
+        )
     if ready:
         print(
             "TARGETS",
             [(item["style"], item["code"], item.get("name", ""),
               item["score"], item.get("strength_score", 0.0),
+              item.get("strength_fit_score", 0.0),
               item.get("entry_score", 0.0),
               item.get("feature", {}).get("entry_setup"))
              for item in ready],
@@ -3087,12 +3299,17 @@ def run_daily_cycle(context, asof, trade_date):
     style_exposures = apply_style_risk_caps(
         base_style_exposures, market.get("risk_caps", {})
     )
+    sizing_reduction_due = meaningful_style_reduction(
+        A.sizing_style_exposures, style_exposures
+    )
 
     if not market_gate_exposures:
         base_style_exposures = {}
         A.base_style_exposures = {}
         style_exposures = {}
         A.target_candidates = []
+        A.reserve_candidates = []
+        A.spectator_candidates = []
         A.entry_ready_codes = set()
         A.desired_shares = {
             code: 0 for code in _managed_positions(snapshot).keys()
@@ -3101,7 +3318,7 @@ def run_daily_cycle(context, asof, trade_date):
         members_by_style = _style_members(
             context, market_gate_exposures.keys()
         )
-        targets = []
+        reserves = []
         used_codes = set()
         sectors_by_style = {}
         ordered_styles = sorted(
@@ -3123,7 +3340,7 @@ def run_daily_cycle(context, asof, trade_date):
                 if item["code"] in used_codes:
                     continue
                 used_codes.add(item["code"])
-                targets.append(item)
+                reserves.append(item)
         base_style_exposures = sector_rotation_exposure_map(
             market["details"], sectors_by_style,
             regimes=market.get("regimes", {}),
@@ -3132,10 +3349,17 @@ def run_daily_cycle(context, asof, trade_date):
         style_exposures = apply_style_risk_caps(
             base_style_exposures, market.get("risk_caps", {})
         )
-        targets = [
-            item for item in targets
+        sizing_reduction_due = meaningful_style_reduction(
+            A.sizing_style_exposures, style_exposures
+        )
+        reserves = [
+            item for item in reserves
             if item.get("style") in style_exposures
         ]
+        A.reserve_candidates = reserves
+        targets, A.spectator_candidates = (
+            select_actionable_watch_candidates(reserves)
+        )
         held_codes = set(_managed_positions(snapshot).keys())
         targets = retain_held_watch_candidates(
             targets, A.target_candidates, held_codes,
@@ -3172,9 +3396,10 @@ def run_daily_cycle(context, asof, trade_date):
         A.execution_prices = _raw_execution_prices(
             context, execution_codes, "open"
         )
-        A.desired_shares = _desired_share_map(
+        A.desired_shares = _sticky_desired_share_map(
             snapshot, style_exposures, A.target_candidates, tick_map,
             A.execution_prices,
+            sizing_reduction_due,
         )
         print("DESIRED", trade_date, A.desired_shares)
         allocation = allocation_metrics(
@@ -3191,8 +3416,16 @@ def run_daily_cycle(context, asof, trade_date):
         A.rebalance_age = 0
 
     if style_exposures and not rebalance_due:
-        A.target_candidates = _refresh_watch_entry_signals(
-            context, asof, A.target_candidates
+        A.reserve_candidates = _refresh_watch_entry_signals(
+            context, asof, A.reserve_candidates
+        )
+        refreshed_targets, A.spectator_candidates = (
+            select_actionable_watch_candidates(A.reserve_candidates)
+        )
+        held_codes = set(_managed_positions(snapshot).keys())
+        A.target_candidates = retain_held_watch_candidates(
+            refreshed_targets, A.target_candidates, held_codes,
+            style_exposures.keys(),
         )
 
     held_codes = set(_managed_positions(snapshot).keys())
@@ -3226,6 +3459,9 @@ def run_daily_cycle(context, asof, trade_date):
                     "entry_setup"
                 ), candidate_map.get(code, {}).get("score", 0.0),
                  candidate_map.get(code, {}).get("strength_score", 0.0),
+                 candidate_map.get(code, {}).get(
+                     "strength_fit_score", 0.0
+                 ),
                  candidate_map.get(code, {}).get("entry_score", 0.0))
                 for code in sorted(
                     current_entry_ready - previous_entry_ready
@@ -3238,11 +3474,7 @@ def run_daily_cycle(context, asof, trade_date):
     risk_allocation_changed = (
         style_exposures != A.current_style_exposures
     )
-    risk_reduction_due = any(
-        float(style_exposures.get(code, 0.0))
-        < float(value) - 1e-12
-        for code, value in A.current_style_exposures.items()
-    )
+    risk_reduction_due = sizing_reduction_due
     exposure = round(sum(style_exposures.values()), 10)
     market["style_exposures"] = dict(style_exposures)
     market["exposure"] = exposure
@@ -3262,9 +3494,10 @@ def run_daily_cycle(context, asof, trade_date):
         tick_map = _simulation_tick(
             context, [item["code"] for item in A.target_candidates]
         )
-        A.desired_shares = _desired_share_map(
+        A.desired_shares = _sticky_desired_share_map(
             snapshot, style_exposures, A.target_candidates, tick_map,
             A.execution_prices,
+            risk_reduction_due,
         )
         print("DESIRED", trade_date, A.desired_shares)
         allocation = allocation_metrics(
@@ -3310,6 +3543,9 @@ def run_daily_cycle(context, asof, trade_date):
     A.last_market_gate_exposures = dict(market_gate_exposures)
     A.last_style_exposures = dict(style_exposures)
     A.current_style_exposures = dict(style_exposures)
+    A.sizing_style_exposures = updated_sizing_style_reference(
+        A.sizing_style_exposures, style_exposures, risk_reduction_due
+    )
     _print_daily_summary(
         trade_date, market, selected_sectors, A.target_candidates
     )
@@ -3348,6 +3584,7 @@ def init(context):
     A.last_market_gate_exposures = {}
     A.last_style_exposures = {}
     A.current_style_exposures = {}
+    A.sizing_style_exposures = {}
     A.base_style_exposures = {}
     A.style_regimes = {
         code: {"state": "OFF"} for code, _ in STYLE_INDEXES
@@ -3355,6 +3592,8 @@ def init(context):
     A.last_processed_date = ""
     A.last_intraday_key = ""
     A.target_candidates = []
+    A.reserve_candidates = []
+    A.spectator_candidates = []
     A.entry_ready_codes = set()
     A.desired_shares = {}
     A.position_meta = {}
