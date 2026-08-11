@@ -259,15 +259,26 @@ function panChart(steps) { if (!state.chartRows.length) return; const bars = Mat
 function resetChartView() { state.chartView.bars[state.chartType] = state.chartType === 'daily' ? 80 : 160; state.chartView.offset[state.chartType] = 0; redrawChart(); }
 
 function selectDay(date) {
-  state.day = state.report.days.find(day => day.date === date) || state.report.days.at(-1);
+  state.day = state.report.days.find(day => day.date === date) || state.report.days[0];
   if (!state.day) return;
-  $('#dateSelect').value = state.day.date; renderMarket(state.day); renderAllocation(state.day); renderIndexCards(); renderSectorStage(); renderCandidates();
+  const index = state.report.days.findIndex(day => day.date === state.day.date);
+  $('#dateSelect').value = state.day.date;
+  $('#previousDay').disabled = index <= 0; $('#nextDay').disabled = index >= state.report.days.length - 1;
+  $('#dateProgress').textContent = `第 ${index + 1} / ${state.report.days.length} 天`;
+  renderMarket(state.day); renderAllocation(state.day); renderIndexCards(); renderSectorStage(); renderCandidates();
+}
+
+function stepDay(offset) {
+  if (!state.day || !state.report?.days?.length) return;
+  const index = state.report.days.findIndex(day => day.date === state.day.date);
+  const next = Math.max(0, Math.min(state.report.days.length - 1, index + offset));
+  if (next !== index) selectDay(state.report.days[next].date);
 }
 
 function diagnostic() {
   const meta = state.report.meta;
   const legacyLinks = state.report.days.some(day => day.watchlist.some(item => !item.sector));
-  $('#diagnosticText').textContent = [`Web版本：V2.0.1 (2026-08-11)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
+  $('#diagnosticText').textContent = [`Web版本：V2.0.2 (2026-08-11)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
 }
 
 function parse() {
@@ -277,7 +288,7 @@ function parse() {
   $('#dateSelect').innerHTML = state.report.days.map(day => `<option value="${html(day.date)}">${displayDate(day.date)}</option>`).join('');
   populateStockSelect(); renderOverview(); diagnostic();
   if (count) {
-    $('.import-panel').classList.remove('open'); $('#pasteButton').setAttribute('aria-expanded', 'false'); selectDay(state.report.days.at(-1).date);
+    $('.import-panel').classList.remove('open'); $('#pasteButton').setAttribute('aria-expanded', 'false'); selectDay(state.report.days[0].date);
     const firstStock = state.report.stocks[0]; if (firstStock) selectStock(firstStock);
   } else $('.import-panel').classList.add('open');
 }
@@ -298,6 +309,8 @@ $('#logInput').addEventListener('focus', () => { $('.import-panel').classList.ad
 $('#logInput').addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') parse(); });
 $('#fileInput').addEventListener('change', async event => { const file = event.target.files[0]; if (!file) return; $('#logInput').value = await file.text(); parse(); });
 $('#dateSelect').addEventListener('change', event => selectDay(event.target.value));
+$('#previousDay').addEventListener('click', () => stepDay(-1));
+$('#nextDay').addEventListener('click', () => stepDay(1));
 $('#chartStockSelect').addEventListener('change', event => { const stock = stockTrading(event.target.value); if (stock) selectStock(stock); });
 document.querySelectorAll('.workspace-tab').forEach(tab => tab.addEventListener('click', () => setWorkspace(tab.dataset.workspace)));
 document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {

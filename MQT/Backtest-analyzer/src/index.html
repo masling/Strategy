@@ -4,12 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>QMT 回测分析器</title>
-  <link rel="stylesheet" href="./styles.css?v=20260811-v200">
+  <link rel="stylesheet" href="./styles.css?v=20260811-v202">
 </head>
 <body>
   <header>
     <div>
-      <span class="eyebrow">QMT STRATEGY LAB · V2.0.1</span>
+      <span class="eyebrow">QMT STRATEGY LAB · V2.0.2</span>
       <h1>回测复盘工作台</h1>
       <p>先核对当日指数、板块和入场候选，再下钻到单股买卖细节。</p>
     </div>
@@ -41,7 +41,10 @@
     <section id="reviewWorkspace" class="workspace active">
       <div class="review-toolbar">
         <div><span class="eyebrow">DAILY REVIEW</span><h2>按交易日还原策略决策链</h2></div>
-        <label class="date-label">交易日<select id="dateSelect"></select></label>
+        <div class="date-control">
+          <label class="date-label" for="dateSelect">交易日 <small id="dateProgress"></small></label>
+          <div class="date-nav"><button id="previousDay" type="button" aria-label="上一个交易日">← 上一天</button><select id="dateSelect"></select><button id="nextDay" type="button" aria-label="下一个交易日">下一天 →</button></div>
+        </div>
       </div>
 
       <article class="stage-card">
@@ -95,6 +98,6 @@
 
     <section class="diagnostics"><details><summary>解析信息与警告</summary><pre id="diagnosticText"></pre></details></section>
   </main>
-  <script type="module" src="./app.mjs?v=20260811-v201"></script>
+  <script type="module" src="./app.mjs?v=20260811-v202"></script>
 </body>
 </html>
