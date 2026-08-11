@@ -439,6 +439,18 @@ class StockSelectionTests(unittest.TestCase):
             "ma13",
         )
 
+    def test_ma7_add_waits_for_ma13_when_short_gap_is_too_small(self):
+        metrics = {
+            "close": 10.5, "low": 10.3, "previous_high": 10.4,
+            "ma7": 10.3, "ma7_prev1": 10.2,
+            "ma13": 10.0, "ma40": 8.5,
+            "ma7_slope3": 0.01, "ma13_slope3": 0.006,
+            "recent_pullback": 0.08,
+        }
+        self.assertIsNone(
+            invoke("trend_add_signal", metrics, 5, "ma40_starter")
+        )
+
     def test_salt_lake_february_24_is_secondary_base_reclaim(self):
         setup = invoke("entry_setup_kind", {
             "close": 35.66, "low": 34.51, "previous_high": 33.91,
@@ -732,7 +744,10 @@ class IntradayAggregationTests(unittest.TestCase):
         )
 
     def test_ma7_pullback_requires_six_percent_and_non_turning_ma7(self):
-        metrics = {"ma7": 10.0, "ma7_prev1": 9.99}
+        metrics = {
+            "ma7": 10.0, "ma7_prev1": 9.99,
+            "ma13": 9.5, "ma40": 9.0,
+        }
         self.assertTrue(
             invoke("ma7_pullback_add_ready", metrics, 11.0, 10.3)
         )
@@ -741,8 +756,23 @@ class IntradayAggregationTests(unittest.TestCase):
         )
         self.assertFalse(invoke(
             "ma7_pullback_add_ready",
-            {"ma7": 9.95, "ma7_prev1": 10.0}, 11.0, 10.3,
+            {"ma7": 9.95, "ma7_prev1": 10.0,
+             "ma13": 9.5, "ma40": 9.0}, 11.0, 10.3,
         ))
+
+    def test_ma7_add_requires_smooth_gap_ratio_and_not_high_above_ma40(self):
+        smooth = {
+            "ma7": 10.0, "ma7_prev1": 9.99,
+            "ma13": 9.5, "ma40": 9.0,
+            "recent_pullback": 0.08,
+        }
+        short_gap_too_small = dict(smooth, ma7=9.6)
+        too_high = dict(smooth, ma40=8.0)
+        self.assertTrue(invoke("ma7_pullback_add_ready", smooth))
+        self.assertFalse(invoke(
+            "ma7_pullback_add_ready", short_gap_too_small
+        ))
+        self.assertFalse(invoke("ma7_pullback_add_ready", too_high))
 
     def test_addback_resumes_remaining_tranche_after_ma7_rebound(self):
         frame = pd.DataFrame({

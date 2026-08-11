@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.7.3_20260807_MA13_FIRST_ADDBACK
+# DOWNLOAD_BUILD: V1.7.4_20260811_MA7_SMOOTH_TREND_GUARD
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_7_3"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_7_4"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 REBALANCE_EVERY = 5
 MAX_SECTORS_PER_STYLE = 3
@@ -48,6 +48,9 @@ TREND_ADD_WINDOW_DAYS = 15
 TREND_ADD_SUPPORT_TOLERANCE = 0.02
 MA7_ADD_MIN_PULLBACK = 0.06
 MA7_ADD_MAX_ROLLOVER = 0.001
+MA7_ADD_MIN_GAP_RATIO = 0.50
+MA7_ADD_MAX_GAP_RATIO = 1.25
+MA7_ADD_MAX_DISTANCE_MA40 = 0.18
 BASE_RECLAIM_SUPPORT_TOLERANCE = 0.04
 BASE_RECLAIM_MAX_DISTANCE_MA40 = 0.15
 BASE_RECLAIM_RESUME_DAYS = 3
@@ -599,6 +602,8 @@ def position_metrics(frame):
         "ma7_prev1": ma7_prev1,
         "ma13": ma13,
         "ma40": ma40,
+        "ma7_ma13_gap": ma7 / ma13 - 1.0,
+        "ma13_ma40_gap": ma13 / ma40 - 1.0,
         "ma7_slope3": ma7 / ma7_prev3 - 1.0,
         "ma13_slope3": ma13 / ma13_prev3 - 1.0,
         "ma40_slope5": ma40 / ma40_prev5 - 1.0,
@@ -820,9 +825,21 @@ def ma7_pullback_add_ready(metrics, peak_price=None, pullback_low=None):
         return False
     ma7 = float(metrics.get("ma7", 0.0))
     ma7_prev1 = float(metrics.get("ma7_prev1", 0.0))
-    if ma7 <= 0.0 or ma7_prev1 <= 0.0:
+    ma13 = float(metrics.get("ma13", 0.0))
+    ma40 = float(metrics.get("ma40", 0.0))
+    if not (ma7 > ma13 > ma40 > 0.0) or ma7_prev1 <= 0.0:
         return False
     if ma7 < ma7_prev1 * (1.0 - MA7_ADD_MAX_ROLLOVER):
+        return False
+    gap7 = ma7 / ma13 - 1.0
+    gap13 = ma13 / ma40 - 1.0
+    if gap13 <= 0.0:
+        return False
+    gap_ratio = gap7 / gap13
+    if not (MA7_ADD_MIN_GAP_RATIO
+            <= gap_ratio <= MA7_ADD_MAX_GAP_RATIO):
+        return False
+    if ma7 / ma40 - 1.0 > MA7_ADD_MAX_DISTANCE_MA40:
         return False
     if peak_price is not None and pullback_low is not None:
         peak = float(peak_price)
