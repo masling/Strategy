@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V1.8.4_20260811_BAR_RANGE_SLIPPAGE
+# DOWNLOAD_BUILD: V1.9.0_20260811_RISK_HYSTERESIS_ORDERLY_EXIT
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V1_8_4"
+STRATEGY_NAME = "QMT_MC_ROTATION_V1_9_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -22,6 +22,15 @@ STYLE_STRONG_SCORE = 80.0
 STYLE_WATCH_SCORE = 70.0
 STYLE_STRONG_EXPOSURE = 0.25
 STYLE_WATCH_EXPOSURE = 0.10
+REGIME_ACTIVATE_SCORE = 75.0
+REGIME_STRONG_SCORE = 85.0
+REGIME_DOWNGRADE_SCORE = 75.0
+REGIME_CLOSE_SCORE = 65.0
+REGIME_CONFIRM_DAYS = 2
+REGIME_STRONG_CAP = 0.60
+REGIME_WARNING_CAP = 0.30
+REGIME_WATCH_CAP = 0.30
+REGIME_EXIT_CAP = 0.15
 MAX_TOTAL_EXPOSURE = 0.80
 INTRADAY_REDUCE_RATIO = 1.0 / 3.0
 ENTRY_MAX_DISTANCE_MA40 = 0.15
@@ -196,12 +205,130 @@ def style_exposure_map(scores, max_total=MAX_TOTAL_EXPOSURE):
     return budgets
 
 
+def advance_style_regime(previous, score):
+    record = dict(previous or {})
+    state = str(record.get("state", "OFF"))
+    if state not in ("OFF", "WATCH", "STRONG"):
+        state = "OFF"
+    if score is None:
+        record["state"] = state
+        return record
+    score = float(score)
+    activate = int(record.get("activate_streak", 0))
+    strong = int(record.get("strong_streak", 0))
+    downgrade = int(record.get("downgrade_streak", 0))
+    close = int(record.get("close_streak", 0))
+
+    if state == "OFF":
+        activate = activate + 1 if score >= REGIME_ACTIVATE_SCORE else 0
+        strong = strong + 1 if score >= REGIME_STRONG_SCORE else 0
+        if activate >= REGIME_CONFIRM_DAYS:
+            state = (
+                "STRONG" if strong >= REGIME_CONFIRM_DAYS else "WATCH"
+            )
+            activate = strong = downgrade = close = 0
+    elif state == "WATCH":
+        strong = strong + 1 if score >= REGIME_STRONG_SCORE else 0
+        close = close + 1 if score < REGIME_CLOSE_SCORE else 0
+        if strong >= REGIME_CONFIRM_DAYS:
+            state = "STRONG"
+            activate = strong = downgrade = close = 0
+        elif close >= REGIME_CONFIRM_DAYS:
+            state = "OFF"
+            activate = strong = downgrade = close = 0
+    else:
+        downgrade = (
+            downgrade + 1 if score < REGIME_DOWNGRADE_SCORE else 0
+        )
+        if downgrade >= REGIME_CONFIRM_DAYS:
+            state = "WATCH"
+            activate = strong = downgrade = close = 0
+
+    return {
+        "state": state,
+        "activate_streak": activate,
+        "strong_streak": strong,
+        "downgrade_streak": downgrade,
+        "close_streak": close,
+        "last_score": score,
+    }
+
+
+def update_style_regimes(scores, previous=None, prior_scores=None):
+    previous = dict(previous or {})
+    regimes = {}
+    transitions = []
+    for code, _ in STYLE_INDEXES:
+        old = dict(previous.get(code, {"state": "OFF"}))
+        if ("last_score" not in old
+                and (prior_scores or {}).get(code) is not None):
+            old = advance_style_regime(
+                old, (prior_scores or {}).get(code)
+            )
+        score = (scores or {}).get(code)
+        new = advance_style_regime(old, score)
+        regimes[code] = new
+        old_state = str(old.get("state", "OFF"))
+        new_state = str(new.get("state", "OFF"))
+        if old_state != new_state:
+            transitions.append((code, old_state, new_state, score))
+    return regimes, transitions
+
+
+def regime_gate_exposure_map(regimes, max_total=MAX_TOTAL_EXPOSURE):
+    budgets = {}
+    for code, record in (regimes or {}).items():
+        state = str(record.get("state", "OFF"))
+        if state == "STRONG":
+            budgets[code] = STYLE_STRONG_EXPOSURE
+        elif state == "WATCH":
+            budgets[code] = STYLE_WATCH_EXPOSURE
+    total = sum(budgets.values())
+    if total > float(max_total) and total > 0.0:
+        scale = float(max_total) / total
+        budgets = {
+            code: round(value * scale, 10)
+            for code, value in budgets.items()
+        }
+    return budgets
+
+
+def style_risk_cap_map(regimes):
+    caps = {}
+    for code, record in (regimes or {}).items():
+        state = str(record.get("state", "OFF"))
+        score = float(record.get("last_score", 0.0))
+        if state == "STRONG":
+            caps[code] = (
+                REGIME_WARNING_CAP
+                if score < REGIME_DOWNGRADE_SCORE else REGIME_STRONG_CAP
+            )
+        elif state == "WATCH":
+            caps[code] = (
+                REGIME_EXIT_CAP
+                if score < REGIME_CLOSE_SCORE else REGIME_WATCH_CAP
+            )
+    return caps
+
+
+def apply_style_risk_caps(exposures, caps):
+    return {
+        code: round(min(float(value), float((caps or {}).get(code, 0.0))), 10)
+        for code, value in (exposures or {}).items()
+        if float((caps or {}).get(code, 0.0)) > 0.0
+    }
+
+
 def sector_rotation_exposure_map(scores, sectors_by_style,
-                                 max_total=MAX_TOTAL_EXPOSURE):
+                                 max_total=MAX_TOTAL_EXPOSURE,
+                                 regimes=None):
     budgets = {}
     for code, sector_items in (sectors_by_style or {}).items():
         score = float((scores or {}).get(code, 0.0))
-        if score < STYLE_WATCH_SCORE:
+        state = str((regimes or {}).get(code, {}).get("state", ""))
+        if regimes is not None and state == "OFF":
+            continue
+        if regimes is None and score < STYLE_WATCH_SCORE:
             continue
         sector_scores = [
             float(item.get("score", 0.0))
@@ -211,7 +338,11 @@ def sector_rotation_exposure_map(scores, sectors_by_style,
         if count <= 0:
             continue
         average_score = sum(sector_scores[:count]) / float(count)
-        if score >= STYLE_STRONG_SCORE:
+        is_strong = (
+            state == "STRONG" if regimes is not None
+            else score >= STYLE_STRONG_SCORE
+        )
+        if is_strong:
             exposure = 0.20 + 0.10 * count
             if count >= 2 and average_score >= 70.0:
                 exposure += 0.10
@@ -1124,6 +1255,7 @@ def _market_state(context, asof):
     codes = [item[0] for item in STYLE_INDEXES]
     daily = fetch_history(context, ["close"], codes, "1d", 55, asof)
     details = {}
+    prior_details = {}
     benchmarks = {}
     for code, _ in STYLE_INDEXES:
         daily_close = _close_values(daily.get(code))
@@ -1131,13 +1263,21 @@ def _market_state(context, asof):
         if score is None:
             continue
         details[code] = score
+        prior_details[code] = trend_71340_score(daily_close[:-1])
         benchmarks[code] = daily_close
-    style_exposures = style_exposure_map(details)
+    regimes, transitions = update_style_regimes(
+        details, getattr(A, "style_regimes", {}), prior_details
+    )
+    A.style_regimes = regimes
+    style_exposures = regime_gate_exposure_map(regimes)
     return {
         "details": details,
         "style_exposures": style_exposures,
         "exposure": round(sum(style_exposures.values()), 10),
         "benchmarks": benchmarks,
+        "regimes": regimes,
+        "risk_caps": style_risk_cap_map(regimes),
+        "transitions": transitions,
     }
 
 
@@ -2035,7 +2175,8 @@ def allocation_metrics(total_asset, style_exposures, desired_shares,
     }
 
 
-def _rebalance_to_desired(context, snapshot, trade_date):
+def _rebalance_to_desired(context, snapshot, trade_date,
+                          sell_reason="rebalance"):
     positions = _managed_positions(snapshot)
     candidate_map = {item["code"]: item for item in A.target_candidates}
     codes = set(positions.keys()) | set(A.desired_shares.keys())
@@ -2058,7 +2199,7 @@ def _rebalance_to_desired(context, snapshot, trade_date):
         volume = raw_volume if desired == 0 else int(raw_volume / 100) * 100
         price = float(A.execution_prices.get(code, 0.0))
         if _send_order(context, "sell", code, volume, trade_date,
-                       "rebalance", price):
+                       sell_reason, price):
             sent_any = True
             retry = True
             sold_codes.add(code)
@@ -2327,7 +2468,12 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
     print(
         "STATE", trade_date, "exposure", market["exposure"],
         "style_exposures", market["style_exposures"],
-        "scores", market["details"]
+        "scores", market["details"],
+        "regimes", {
+            code: record.get("state", "OFF")
+            for code, record in market.get("regimes", {}).items()
+        },
+        "risk_caps", market.get("risk_caps", {}),
     )
     if sectors:
         print(
@@ -2583,13 +2729,28 @@ def run_daily_cycle(context, asof, trade_date):
         return
     _refresh_owned_codes(snapshot)
     _advance_position_plans(trade_date)
+    for code, old_state, new_state, score in market.get("transitions", []):
+        print(
+            "REGIME", trade_date, code, old_state, "to", new_state,
+            "score", score,
+        )
 
-    style_changed = market_gate_exposures != A.last_market_gate_exposures
-    rebalance_due = A.rebalance_age >= REBALANCE_EVERY or style_changed
+    pool_membership_changed = (
+        set(market_gate_exposures.keys())
+        != set(A.last_market_gate_exposures.keys())
+    )
+    rebalance_due = (
+        A.rebalance_age >= REBALANCE_EVERY or pool_membership_changed
+    )
     selected_sectors = []
-    style_exposures = dict(A.current_style_exposures)
+    base_style_exposures = dict(A.base_style_exposures)
+    style_exposures = apply_style_risk_caps(
+        base_style_exposures, market.get("risk_caps", {})
+    )
 
     if not market_gate_exposures:
+        base_style_exposures = {}
+        A.base_style_exposures = {}
         style_exposures = {}
         A.target_candidates = []
         A.desired_shares = {
@@ -2622,8 +2783,13 @@ def run_daily_cycle(context, asof, trade_date):
                     continue
                 used_codes.add(item["code"])
                 targets.append(item)
-        style_exposures = sector_rotation_exposure_map(
-            market["details"], sectors_by_style
+        base_style_exposures = sector_rotation_exposure_map(
+            market["details"], sectors_by_style,
+            regimes=market.get("regimes", {}),
+        )
+        A.base_style_exposures = dict(base_style_exposures)
+        style_exposures = apply_style_risk_caps(
+            base_style_exposures, market.get("risk_caps", {})
         )
         targets = [
             item for item in targets
@@ -2678,17 +2844,47 @@ def run_daily_cycle(context, asof, trade_date):
         )
         A.rebalance_age = 0
 
+    risk_allocation_changed = (
+        style_exposures != A.current_style_exposures
+    )
+    risk_reduction_due = any(
+        float(style_exposures.get(code, 0.0))
+        < float(value) - 1e-12
+        for code, value in A.current_style_exposures.items()
+    )
     exposure = round(sum(style_exposures.values()), 10)
     market["style_exposures"] = dict(style_exposures)
     market["exposure"] = exposure
 
-    if not rebalance_due or not style_exposures:
+    if not rebalance_due or not style_exposures or risk_allocation_changed:
         execution_codes = (
             set(_managed_positions(snapshot).keys())
             | {item["code"] for item in A.target_candidates}
         )
         A.execution_prices = _raw_execution_prices(
             context, execution_codes, "open"
+        )
+
+    if (risk_allocation_changed and not rebalance_due
+            and style_exposures):
+        tick_map = _simulation_tick(
+            context, [item["code"] for item in A.target_candidates]
+        )
+        A.desired_shares = _desired_share_map(
+            snapshot, style_exposures, A.target_candidates, tick_map,
+            A.execution_prices,
+        )
+        print("DESIRED", trade_date, A.desired_shares)
+        allocation = allocation_metrics(
+            snapshot["balance"], style_exposures,
+            A.desired_shares, A.target_candidates, A.execution_prices
+        )
+        print(
+            "ALLOCATION", trade_date,
+            "planned_exposure", allocation["planned_exposure"],
+            "target_exposure", allocation["target_exposure"],
+            "fill_rate", allocation["fill_rate"],
+            "unallocated_cash", allocation["unallocated_cash"],
         )
 
     exit_sent = _risk_exits(
@@ -2708,11 +2904,13 @@ def run_daily_cycle(context, asof, trade_date):
         print("DESIRED", trade_date, A.desired_shares)
     should_rebalance = (
         rebalance_due or not market_gate_exposures
+        or risk_allocation_changed
         or A.retry_rebalance or exit_sent or trend_add_due
     )
     if should_rebalance:
         A.retry_rebalance = _rebalance_to_desired(
-            context, snapshot, trade_date
+            context, snapshot, trade_date,
+            "risk_reduce" if risk_reduction_due else "rebalance",
         )
     A.rebalance_age += 1
     A.last_exposure = exposure
@@ -2757,6 +2955,10 @@ def init(context):
     A.last_market_gate_exposures = {}
     A.last_style_exposures = {}
     A.current_style_exposures = {}
+    A.base_style_exposures = {}
+    A.style_regimes = {
+        code: {"state": "OFF"} for code, _ in STYLE_INDEXES
+    }
     A.last_processed_date = ""
     A.last_intraday_key = ""
     A.target_candidates = []

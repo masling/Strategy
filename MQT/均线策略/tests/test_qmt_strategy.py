@@ -71,6 +71,43 @@ class MarketRegimeTests(unittest.TestCase):
         self.assertTrue(all(abs(value - 0.20) < 1e-12
                             for value in budgets.values()))
 
+    def test_regime_requires_two_days_to_open_and_strengthen(self):
+        first = invoke("advance_style_regime", {"state": "OFF"}, 80.0)
+        self.assertEqual(first["state"], "OFF")
+        second = invoke("advance_style_regime", first, 80.0)
+        self.assertEqual(second["state"], "WATCH")
+        third = invoke("advance_style_regime", second, 90.0)
+        self.assertEqual(third["state"], "WATCH")
+        fourth = invoke("advance_style_regime", third, 90.0)
+        self.assertEqual(fourth["state"], "STRONG")
+
+    def test_strong_regime_exits_in_stages_after_persistent_weakness(self):
+        state = {"state": "STRONG", "last_score": 90.0}
+        state = invoke("advance_style_regime", state, 60.0)
+        self.assertEqual(state["state"], "STRONG")
+        self.assertEqual(
+            invoke("style_risk_cap_map", {"S": state}), {"S": 0.30}
+        )
+        state = invoke("advance_style_regime", state, 60.0)
+        self.assertEqual(state["state"], "WATCH")
+        self.assertEqual(
+            invoke("style_risk_cap_map", {"S": state}), {"S": 0.15}
+        )
+        state = invoke("advance_style_regime", state, 60.0)
+        self.assertEqual(state["state"], "WATCH")
+        state = invoke("advance_style_regime", state, 60.0)
+        self.assertEqual(state["state"], "OFF")
+
+    def test_risk_caps_reduce_exposure_without_forcing_immediate_zero(self):
+        reduced = invoke(
+            "apply_style_risk_caps",
+            {"000300.SH": 0.60, "399006.SZ": 0.20},
+            {"000300.SH": 0.30, "399006.SZ": 0.15},
+        ) or {}
+        self.assertEqual(reduced, {
+            "000300.SH": 0.30, "399006.SZ": 0.15,
+        })
+
     def test_one_strong_style_with_three_active_sectors_reaches_sixty_percent(self):
         budgets = invoke(
             "sector_rotation_exposure_map",
@@ -121,6 +158,9 @@ class MarketRegimeTests(unittest.TestCase):
                 }
 
         context = FakeContext()
+        strategy.A.style_regimes = {
+            code: {"state": "OFF"} for code, _ in strategy.STYLE_INDEXES
+        }
         market = invoke("_market_state", context, "20260803") or {}
         self.assertEqual(context.periods, ["1d"])
         self.assertAlmostEqual(market["exposure"], 0.80)
