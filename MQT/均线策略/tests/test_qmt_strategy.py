@@ -559,6 +559,47 @@ class StockSelectionTests(unittest.TestCase):
         })
         self.assertEqual(setup, "ma40_starter")
 
+    def test_ma7_pullback_enters_small_when_opening_is_still_widening(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 102.0, "low": 101.8, "previous_high": 103.0,
+            "ma7": 101.5, "ma7_prev1": 101.0, "ma7_prev2": 100.6,
+            "ma13": 100.0, "ma13_prev1": 99.7, "ma13_prev": 99.2,
+            "ma40": 92.0, "ma40_prev": 91.4,
+            "ma7_slope3": 0.012, "ma13_slope3": 0.009,
+            "ma40_slope5": 0.006,
+            "distance_ma40": 102.0 / 92.0 - 1.0,
+            "ma7_ma13_gap": 101.5 / 100.0 - 1.0,
+            "ma13_ma40_gap": 100.0 / 92.0 - 1.0,
+        })
+        self.assertEqual(setup, "ma7_pullback")
+        self.assertLess(invoke("entry_setup_scale", setup), 1.0)
+
+    def test_ma13_rebound_enters_small_after_same_day_recovery(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 100.5, "low": 100.3, "previous_high": 102.0,
+            "ma7": 102.5, "ma7_prev1": 102.4, "ma7_prev2": 102.2,
+            "ma13": 100.0, "ma13_prev1": 99.8, "ma13_prev": 99.1,
+            "ma40": 91.7, "ma40_prev": 91.2,
+            "ma7_slope3": 0.002, "ma13_slope3": 0.009,
+            "ma40_slope5": 0.005,
+            "distance_ma40": 100.5 / 91.7 - 1.0,
+            "ma7_ma13_gap": 102.5 / 100.0 - 1.0,
+            "ma13_ma40_gap": 100.0 / 91.7 - 1.0,
+        })
+        self.assertEqual(setup, "ma13_rebound")
+
+    def test_pullback_build_adds_on_recent_high_breakout(self):
+        metrics = {
+            "close": 106.5, "low": 104.5, "previous_high": 105.0,
+            "previous_peak_price": 105.8,
+            "ma7": 102.0, "ma13": 99.5, "ma40": 95.0,
+            "ma7_slope3": 0.012, "ma13_slope3": 0.008,
+        }
+        self.assertEqual(
+            invoke("trend_add_signal", metrics, 3, "ma7_pullback"),
+            "breakout",
+        )
+
     def test_shanghai_xinyang_starter_rejects_ma7_falling_toward_ma13(self):
         setup = invoke("entry_setup_kind", {
             "close": 61.95, "low": 59.9, "previous_high": 61.2,

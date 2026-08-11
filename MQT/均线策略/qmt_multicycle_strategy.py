@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.4.1_20260811_SECTOR_KLINE_LOG
+# DOWNLOAD_BUILD: V2.4.2_20260811_PULLBACK_REENTRY
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_1"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_2"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -78,6 +78,17 @@ ADDBACK_MIN_MA13_SLOPE_3D = 0.0005
 ADDBACK_MIN_DISTANCE_MA7 = 0.05
 ADDBACK_MIN_DISTANCE_MA13 = 0.08
 STARTER_POSITION_SCALE = 0.5
+PULLBACK_POSITION_SCALE = 0.35
+PULLBACK_MIN_COMPOSITE_SCORE = 55.0
+PULLBACK_MAX_DISTANCE_MA7 = 0.04
+PULLBACK_MAX_DISTANCE_MA40 = 0.15
+PULLBACK_SUPPORT_TOLERANCE = 0.02
+PULLBACK_SUPPORT_RECLAIM_TOLERANCE = 0.006
+PULLBACK_MIN_MA7_SLOPE_3D = 0.001
+PULLBACK_MIN_MA13_SLOPE_3D = 0.0005
+PULLBACK_MIN_GAP_RATIO = 0.60
+PULLBACK_MAX_GAP_RATIO = 2.40
+PULLBACK_BREAKOUT_MAX_DISTANCE_MA7 = 0.06
 STARTER_MAX_MA7_MA13_GAP = 0.015
 STARTER_MAX_MA13_MA40_GAP = 0.045
 STARTER_MAX_DISTANCE_MA40 = 0.08
@@ -697,6 +708,20 @@ def ma_slopes_in_flow_zone(slope7, slope13, slope40):
         <= rate13 / rate40 <= MA13_TO_MA40_SLOPE_MAX_RATIO
     )
 
+
+def _is_pullback_setup(setup):
+    return str(setup or "") in ("ma7_pullback", "ma13_rebound")
+
+
+def entry_setup_scale(setup):
+    """Keep support entries small until their continuation is confirmed."""
+    if _is_pullback_setup(setup):
+        return PULLBACK_POSITION_SCALE
+    if str(setup or "") in ("ma40_starter", "base_reclaim"):
+        return STARTER_POSITION_SCALE
+    return 1.0
+
+
 def entry_setup_kind(metrics):
     close = float(metrics["close"])
     low = float(metrics["low"])
@@ -717,6 +742,48 @@ def entry_setup_kind(metrics):
     gap13 = float(metrics["ma13_ma40_gap"])
     ma7_prev1 = float(metrics.get("ma7_prev1", ma7 - 1e-12))
     ma7_prev2 = float(metrics.get("ma7_prev2", ma7_prev1 - 1e-12))
+    ma13_prev1 = float(metrics.get("ma13_prev1", ma13))
+    prior_gap7 = ma7_prev1 / ma13_prev1 - 1.0 if ma13_prev1 > 0.0 else 0.0
+
+    # A strong trend can be entered on a controlled MA7 pullback.  This is
+    # deliberately a small first position: the later break of the recent high
+    # is what earns the remaining allocation.
+    ma7_pullback = bool(
+        close >= ma7 > ma13 > ma40
+        and ma7 > ma7_prev1 and ma13 > ma13_prev
+        and ma40 > ma40_prev
+        and slope7 >= PULLBACK_MIN_MA7_SLOPE_3D
+        and slope13 >= PULLBACK_MIN_MA13_SLOPE_3D
+        and low >= ma7 * (1.0 - PULLBACK_SUPPORT_TOLERANCE)
+        and low <= ma7 * (1.0 + PULLBACK_SUPPORT_RECLAIM_TOLERANCE)
+        and close / ma7 - 1.0 <= PULLBACK_MAX_DISTANCE_MA7
+        and distance40 <= PULLBACK_MAX_DISTANCE_MA40
+        and gap7 > max(0.0, prior_gap7)
+        and ma_gap_ratio_in_flow_zone(
+            gap7, gap13, PULLBACK_MIN_GAP_RATIO, PULLBACK_MAX_GAP_RATIO
+        )
+    )
+    if ma7_pullback:
+        return "ma7_pullback"
+
+    # MA13 is the deeper, higher-probability support in an intact trend.  It
+    # must show a same-day recovery; a bare close below MA13 is not a signal.
+    ma13_rebound = bool(
+        close >= ma13 and ma7 > ma13 > ma40
+        and ma13 > ma13_prev and ma40 > ma40_prev
+        and slope7 >= -PULLBACK_MIN_MA7_SLOPE_3D
+        and slope13 >= PULLBACK_MIN_MA13_SLOPE_3D
+        and low >= ma13 * (1.0 - PULLBACK_SUPPORT_TOLERANCE)
+        and low <= ma13 * (1.0 + PULLBACK_SUPPORT_RECLAIM_TOLERANCE)
+        and close / ma7 - 1.0 <= PULLBACK_MAX_DISTANCE_MA7
+        and distance40 <= PULLBACK_MAX_DISTANCE_MA40
+        and ma_gap_ratio_in_flow_zone(
+            gap7, gap13, PULLBACK_MIN_GAP_RATIO, PULLBACK_MAX_GAP_RATIO
+        )
+    )
+    if ma13_rebound:
+        return "ma13_rebound"
+
     trend_entry = bool(
         close > ma7 > ma13 > ma40
         and ma13 > ma13_prev and ma40 > ma40_prev
@@ -840,6 +907,7 @@ def stock_feature(frame, sector_return13, sector_return40,
     ma7_prev1 = float(np.mean(close[-8:-1]))
     ma7_prev2 = float(np.mean(close[-9:-2]))
     ma13 = float(np.mean(close[-13:]))
+    ma13_prev1 = float(np.mean(close[-14:-1]))
     ma40 = float(np.mean(close[-40:]))
     ma7_prev3 = float(np.mean(close[-10:-3]))
     ma13_prev3 = float(np.mean(close[-16:-3]))
@@ -866,6 +934,9 @@ def stock_feature(frame, sector_return13, sector_return40,
     recent_peak_price = float(
         np.max(np.asarray(data["high"], dtype=float)[-10:])
     )
+    previous_peak_price = float(
+        np.max(np.asarray(data["high"], dtype=float)[-11:-1])
+    )
     high_proximity = close[-1] / high40 if high40 > 0 else 0.0
     atr = _atr(data, 14)
 
@@ -874,7 +945,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "previous_high": previous_high,
         "ma7": ma7, "ma7_prev1": ma7_prev1,
         "ma7_prev2": ma7_prev2,
-        "ma13": ma13, "ma40": ma40,
+        "ma13": ma13, "ma13_prev1": ma13_prev1, "ma40": ma40,
         "ma13_prev": ma13_prev, "ma40_prev": ma40_prev,
         "ma7_slope3": ma7_slope3, "ma13_slope3": ma13_slope3,
         "ma40_slope5": ma40_slope5,
@@ -917,6 +988,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "ma7_prev1": ma7_prev1,
         "ma7_prev2": ma7_prev2,
         "ma13": ma13,
+        "ma13_prev1": ma13_prev1,
         "ma40": ma40,
         "r13": r13,
         "r40": r40,
@@ -934,6 +1006,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "selection_eligible": selection_eligible,
         "high_proximity": high_proximity,
         "recent_peak_price": recent_peak_price,
+        "previous_peak_price": previous_peak_price,
         "average_amount": average_amount,
         "average_amount5": average_amount5,
         "amount_ratio5": amount_ratio5,
@@ -1241,7 +1314,9 @@ def entry_candidate_status(candidate, min_score=ENTRY_MIN_SCORE):
     if not bool(feature.get("selection_eligible", True)):
         return "STRENGTH_WAIT"
     setup = str(feature.get("entry_setup", ""))
-    is_starter = setup in ("ma40_starter", "base_reclaim")
+    is_starter = setup in (
+        "ma40_starter", "base_reclaim", "ma7_pullback", "ma13_rebound"
+    )
     maximum_strength = (
         STARTER_MAX_STRENGTH_SCORE
         if is_starter else ENTRY_MAX_STRENGTH_SCORE
@@ -1257,10 +1332,13 @@ def entry_candidate_status(candidate, min_score=ENTRY_MIN_SCORE):
         STARTER_MIN_STRENGTH_SCORE
         if is_starter else ENTRY_MIN_STRENGTH_SCORE
     )
-    minimum_composite = (
-        STARTER_MIN_COMPOSITE_SCORE
-        if is_starter else ENTRY_MIN_COMPOSITE_SCORE
-    )
+    if _is_pullback_setup(setup):
+        minimum_composite = PULLBACK_MIN_COMPOSITE_SCORE
+    else:
+        minimum_composite = (
+            STARTER_MIN_COMPOSITE_SCORE
+            if is_starter else ENTRY_MIN_COMPOSITE_SCORE
+        )
     if float((candidate or {}).get("strength_score", 0.0)) < minimum_strength:
         return "LOW_STRENGTH"
     if float((candidate or {}).get("score", 0.0)) < minimum_composite:
@@ -1486,14 +1564,21 @@ def trend_add_signal(metrics, age, setup=""):
     ma7 = float(metrics.get("ma7", 0.0))
     ma13 = float(metrics.get("ma13", 0.0))
     ma40 = float(metrics.get("ma40", 0.0))
+    close = float(metrics.get("close", 0.0))
     if not (ma7 > ma13 > ma40 > 0.0):
         return None
     if float(metrics.get("ma7_slope3", 0.0)) < ENTRY_MIN_MA7_SLOPE_3D:
         return None
     if float(metrics.get("ma13_slope3", 0.0)) < ENTRY_MIN_MA13_SLOPE_3D:
         return None
+    previous_peak = float(metrics.get("previous_peak_price", 0.0))
+    distance7 = close / ma7 - 1.0 if ma7 > 0.0 else float("inf")
+    if (_is_pullback_setup(setup)
+            and previous_peak > 0.0
+            and close > previous_peak
+            and 0.0 <= distance7 <= PULLBACK_BREAKOUT_MAX_DISTANCE_MA7):
+        return "breakout"
     low = float(metrics.get("low", 0.0))
-    close = float(metrics.get("close", 0.0))
     previous_high = float(metrics.get("previous_high", 0.0))
     if not (low > 0.0 and close > previous_high > 0.0):
         return None
@@ -2619,6 +2704,8 @@ def entry_max_execution_price(candidate):
     max_distance = (
         STARTER_MAX_DISTANCE_MA7
         if setup in ("ma40_starter", "base_reclaim")
+        else PULLBACK_MAX_DISTANCE_MA7
+        if _is_pullback_setup(setup)
         else ENTRY_MAX_DISTANCE_MA7
     )
     return min(
@@ -2908,6 +2995,7 @@ def _rebalance_to_desired(context, snapshot, trade_date,
                     "start_date": str(trade_date),
                     "last_age_date": str(trade_date),
                     "age": 0,
+                    "base_scale": float(A.entry_scales.get(code, 1.0)),
                     "setup": candidate_map.get(code, {}).get(
                         "feature", {}
                     ).get("entry_setup", ""),
@@ -3277,11 +3365,15 @@ def run_intraday_cycle(context, end_time, trade_date):
                             "build_add_unconfirmed",
                             execution_prices.get(code)):
                         A.desired_shares[code] = max(0, current - volume)
-                        A.entry_scales[code] = STARTER_POSITION_SCALE
+                        A.entry_scales[code] = float(confirm_plan.get(
+                            "base_scale", STARTER_POSITION_SCALE
+                        ))
                         A.build_confirm_plans.pop(code, None)
                     elif current <= int(confirm_plan.get(
                             "base_volume", current)):
-                        A.entry_scales[code] = STARTER_POSITION_SCALE
+                        A.entry_scales[code] = float(confirm_plan.get(
+                            "base_scale", STARTER_POSITION_SCALE
+                        ))
                         A.build_confirm_plans.pop(code, None)
                     continue
                 else:
@@ -3417,7 +3509,7 @@ def run_intraday_cycle(context, end_time, trade_date):
                     )
             else:
                 A.intraday_scales[code] = previous_scale
-        elif build_signal in ("ma7", "ma13") and build_plan:
+        elif build_signal in ("ma7", "ma13", "breakout") and build_plan:
             previous_scale = float(A.entry_scales.get(
                 code, STARTER_POSITION_SCALE
             ))
@@ -3450,7 +3542,12 @@ def run_intraday_cycle(context, end_time, trade_date):
                     "add_date": str(trade_date),
                     "base_volume": current,
                     "added_volume": missing,
-                    "support_kind": build_signal,
+                    "base_scale": float(build_plan.get(
+                        "base_scale", previous_scale
+                    )),
+                    "support_kind": (
+                        "ma7" if build_signal == "breakout" else build_signal
+                    ),
                 }
             else:
                 A.entry_scales[code] = previous_scale
@@ -3574,10 +3671,8 @@ def run_daily_cycle(context, asof, trade_date):
             if (code in held_codes or code in A.entry_scales
                     or not bool(item.get("entry_ready", False))):
                 continue
-            A.entry_scales[code] = (
-                STARTER_POSITION_SCALE
-                if item.get("feature", {}).get("entry_setup")
-                in ("ma40_starter", "base_reclaim") else 1.0
+            A.entry_scales[code] = entry_setup_scale(
+                item.get("feature", {}).get("entry_setup")
             )
         A.intraday_scales = {
             code: scale for code, scale in A.intraday_scales.items()
@@ -3639,10 +3734,8 @@ def run_daily_cycle(context, asof, trade_date):
         if (code in held_codes or code not in current_entry_ready
                 or code in A.entry_scales):
             continue
-        A.entry_scales[code] = (
-            STARTER_POSITION_SCALE
-            if item.get("feature", {}).get("entry_setup")
-            in ("ma40_starter", "base_reclaim") else 1.0
+        A.entry_scales[code] = entry_setup_scale(
+            item.get("feature", {}).get("entry_setup")
         )
     entry_signal_changed = current_entry_ready != previous_entry_ready
     if entry_signal_changed:
