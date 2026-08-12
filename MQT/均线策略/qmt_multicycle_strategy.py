@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.4.7_20260812_INTRADAY_EXHAUSTION_FADE
+# DOWNLOAD_BUILD: V2.4.8_20260812_QMT_OLD_PANDAS_COMPAT
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_7"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_8"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -1024,8 +1024,9 @@ def first_ma13_pullback_metrics(data, atr):
             or not np.all(np.isfinite(high[-15:]))
             or not np.all(np.isfinite(low[-15:]))):
         return empty
-    ma7_series = pd.Series(close).rolling(7).mean().to_numpy()
-    ma13_series = pd.Series(close).rolling(13).mean().to_numpy()
+    # QMT ships an older pandas build without Series.to_numpy().
+    ma7_series = np.asarray(pd.Series(close).rolling(7).mean(), dtype=float)
+    ma13_series = np.asarray(pd.Series(close).rolling(13).mean(), dtype=float)
     end = len(close) - 1
     start = max(12, end - 12)
     peak_slice = high[start:end]

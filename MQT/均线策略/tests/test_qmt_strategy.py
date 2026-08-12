@@ -694,6 +694,23 @@ class StockSelectionTests(unittest.TestCase):
         self.assertEqual(metrics["first_pullback_days_from_peak"], 4)
         self.assertEqual(metrics["first_pullback_prior_touches"], 0)
 
+    def test_first_pullback_metrics_supports_series_without_to_numpy(self):
+        original = pd.Series.to_numpy
+        try:
+            def unavailable(*args, **kwargs):
+                raise AttributeError("to_numpy unavailable")
+            pd.Series.to_numpy = unavailable
+            frame = pd.DataFrame({
+                "close": np.arange(100.0, 155.0),
+                "high": np.arange(101.0, 156.0),
+                "low": np.arange(99.0, 154.0),
+                "amount": np.repeat(100000000.0, 55),
+            })
+            metrics = invoke("first_ma13_pullback_metrics", frame, 3.0)
+            self.assertIsInstance(metrics, dict)
+        finally:
+            pd.Series.to_numpy = original
+
     def test_first_pullback_touch_count_keeps_a_post_peak_support_test(self):
         close = np.arange(100.0, 155.0)
         high = close * 1.01
