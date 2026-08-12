@@ -1192,17 +1192,17 @@ class RiskAndSizingTests(unittest.TestCase):
         )
         self.assertEqual(reason, "sector_ma40_break")
 
-    def test_no_ma13_rebound_reduces_after_second_break_day(self):
+    def test_no_ma13_rebound_reduces_after_third_break_day(self):
         reason = invoke(
             "exit_reason", 99.0, 99.2, 100.0, 95.0, 3.0, 100.0,
-            1, True, 0.25,
+            2, True, 0.25,
         )
         self.assertEqual(reason, "ma13_no_rebound_reduce")
 
-    def test_ma13_break_exits_only_after_third_unrecovered_day(self):
+    def test_ma13_break_exits_only_after_fourth_unrecovered_day(self):
         reason = invoke(
             "exit_reason", 99.0, 100.2, 100.0, 95.0, 3.0, 100.0,
-            2, True, 0.25,
+            3, True, 0.25,
         )
         self.assertEqual(reason, "ma13_break")
 
@@ -1412,12 +1412,13 @@ class RiskAndSizingTests(unittest.TestCase):
     def test_entry_guard_converts_adjusted_ma_to_raw_price_coordinate(self):
         candidate = {"feature": {
             "entry_setup": "trend", "close": 934.0,
-            "ma7": 925.0, "ma40": 850.0,
+            "ma7": 925.0, "ma13": 900.0, "ma40": 850.0,
             "raw_signal_close": 20.0,
         }}
         levels = invoke("entry_raw_price_levels", candidate) or {}
         self.assertAlmostEqual(levels["signal_close"], 20.0)
         self.assertAlmostEqual(levels["ma7"], 925.0 * 20.0 / 934.0)
+        self.assertAlmostEqual(levels["ma13"], 900.0 * 20.0 / 934.0)
         self.assertTrue(invoke("buy_entry_price_allowed", 20.3, candidate))
         self.assertFalse(invoke("buy_entry_price_allowed", 20.7, candidate))
 
@@ -1503,6 +1504,27 @@ class IntradayAggregationTests(unittest.TestCase):
             "reduce_exhaustion",
         )
 
+    def test_low_volume_extension_far_above_ma7_reduces_position(self):
+        history_index = list(pd.date_range(
+            "2026-07-01 14:30", periods=20, freq="D"
+        ))
+        index = pd.DatetimeIndex(history_index + [
+            pd.Timestamp("2026-08-03 10:00"),
+            pd.Timestamp("2026-08-03 10:30"),
+        ])
+        frame = pd.DataFrame({
+            "open": np.repeat(10.0, 22), "high": np.repeat(10.2, 22),
+            "low": np.repeat(9.8, 22), "close": np.repeat(10.0, 22),
+            "volume": np.repeat(100.0, 22),
+            "amount": np.repeat(1000.0, 22),
+        }, index=index)
+        frame.iloc[-2] = [10.6, 11.1, 10.4, 10.55, 110.0, 1100.0]
+        frame.iloc[-1] = [10.55, 10.6, 10.1, 10.3, 90.0, 900.0]
+        self.assertEqual(
+            invoke("intraday_action", frame, 10.0, 9.5, False),
+            "reduce_exhaustion",
+        )
+
     def test_intraday_top_requires_profit_and_distance_from_daily_mas(self):
         metrics = {
             "ma7": 10.0, "ma13": 9.7, "ma40": 9.0,
@@ -1563,6 +1585,34 @@ class IntradayAggregationTests(unittest.TestCase):
             ),
             "ma13",
         )
+
+    def test_intraday_entry_requires_two_30m_ma13_reclaim_bars(self):
+        frame = pd.DataFrame({
+            "open": [9.92, 10.03], "high": [10.12, 10.26],
+            "low": [9.88, 10.00], "close": [10.05, 10.20],
+            "volume": [100.0, 80.0], "amount": [1000.0, 800.0],
+        }, index=pd.to_datetime(["2026-08-03 10:00", "2026-08-03 10:30"]))
+        daily_metrics = {
+            "ma7": 10.4, "ma13": 9.95, "ma40": 9.2,
+            "ma7_slope3": 0.002, "ma13_slope3": 0.003,
+        }
+        self.assertTrue(invoke(
+            "intraday_ma13_reclaim_entry_signal", frame, daily_metrics
+        ))
+
+    def test_intraday_entry_rejects_weak_second_30m_bar(self):
+        frame = pd.DataFrame({
+            "open": [9.92, 10.03], "high": [10.12, 10.20],
+            "low": [9.88, 9.94], "close": [10.05, 9.98],
+            "volume": [100.0, 40.0], "amount": [1000.0, 400.0],
+        }, index=pd.to_datetime(["2026-08-03 10:00", "2026-08-03 10:30"]))
+        daily_metrics = {
+            "ma7": 10.4, "ma13": 9.95, "ma40": 9.2,
+            "ma7_slope3": 0.002, "ma13_slope3": 0.003,
+        }
+        self.assertFalse(invoke(
+            "intraday_ma13_reclaim_entry_signal", frame, daily_metrics
+        ))
 
     def test_starter_ma7_add_keeps_daily_smoothness_guard(self):
         frame = pd.DataFrame({

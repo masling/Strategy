@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.4.8_20260812_QMT_OLD_PANDAS_COMPAT
+# DOWNLOAD_BUILD: V2.4.9_20260812_INTRADAY_MA13_CONFIRM
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_8"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_9"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -112,7 +112,14 @@ BOTTOM_CROSS_MIN_MA7_SLOPE_3D = 0.004
 BOTTOM_CROSS_MIN_MA13_SLOPE_3D = -0.002
 BOTTOM_CROSS_MAX_DISTANCE_MA40 = 0.10
 MA13_NO_REBOUND_REDUCE_RATIO = 0.50
-MA13_MAX_BREAK_DAYS = 3
+MA13_NO_REBOUND_REDUCE_DAYS = 3
+MA13_MAX_BREAK_DAYS = 4
+INTRADAY_ENTRY_WATCH_PER_STYLE = 6
+INTRADAY_ENTRY_POSITION_SCALE = 0.35
+INTRADAY_ENTRY_SUPPORT_TOLERANCE = 0.012
+INTRADAY_ENTRY_MIN_RECLAIM_VOLUME_RATIO = 0.70
+INTRADAY_EXTENSION_MIN_DISTANCE_MA7 = 0.08
+INTRADAY_EXTENSION_MAX_VOLUME_RATIO = 1.20
 STARTER_MAX_MA7_MA13_GAP = 0.015
 STARTER_MAX_MA13_MA40_GAP = 0.045
 STARTER_MAX_DISTANCE_MA40 = 0.08
@@ -778,6 +785,13 @@ def entry_setup_scale(setup):
     if _is_starter_setup(setup):
         return STARTER_POSITION_SCALE
     return 1.0
+
+
+def entry_requires_intraday_ma13_confirmation(candidate):
+    setup = str((candidate or {}).get("feature", {}).get(
+        "entry_setup", ""
+    ))
+    return setup in ("ma13_rebound", "first_ma13_pullback")
 
 
 def entry_setup_kind(metrics):
@@ -1635,7 +1649,8 @@ def exit_reason(close, high, ma13, ma40, atr, entry_price,
     below_days = int(prior_below_ma13_days) + 1
     if close < ma13 and below_days >= MA13_MAX_BREAK_DAYS:
         return "ma13_break"
-    if (close < ma13 and below_days >= 2 and not ma13_reduced
+    if (close < ma13 and below_days >= MA13_NO_REBOUND_REDUCE_DAYS
+            and not ma13_reduced
             and high < ma13 * 0.995):
         return "ma13_no_rebound_reduce"
     if not still_selected:
@@ -1888,6 +1903,135 @@ def intraday_build_add_signal(frame30, daily_metrics, age, setup=""):
     return None
 
 
+def intraday_ma13_reclaim_entry_signal(frame30, daily_metrics):
+    """Confirm a same-day MA13 undercut/reclaim with two completed 30m bars."""
+    if not daily_metrics or frame30 is None or len(frame30) < 2:
+        return False
+    data = frame30.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=["open", "high", "low", "close", "volume"]
+    )
+    if len(data) < 2:
+        return False
+    index = _datetime_index(data.index)
+    latest_day = index[-1].normalize()
+    same_day = data[index.normalize() == latest_day].copy()
+    same_day.index = index[index.normalize() == latest_day]
+    if len(same_day) < 2:
+        return False
+    previous = same_day.iloc[-2]
+    latest = same_day.iloc[-1]
+    ma7 = float(daily_metrics.get("ma7", 0.0))
+    ma13 = float(daily_metrics.get("ma13", 0.0))
+    ma40 = float(daily_metrics.get("ma40", 0.0))
+    if not (ma7 > ma13 > ma40 > 0.0):
+        return False
+    if float(daily_metrics.get("ma13_slope3", 0.0)) < PULLBACK_MIN_MA13_SLOPE_3D:
+        return False
+    if float(daily_metrics.get("ma7_slope3", 0.0)) < FIRST_MA13_PULLBACK_MAX_MA7_ROLLOVER:
+        return False
+    session_low = float(same_day["low"].min())
+    if not (
+            session_low >= ma13 * (1.0 - FIRST_MA13_PULLBACK_SUPPORT_TOLERANCE)
+            and session_low <= ma13 * (1.0 + INTRADAY_ENTRY_SUPPORT_TOLERANCE)
+    ):
+        return False
+    first_close = float(previous["close"])
+    latest_close = float(latest["close"])
+    latest_range = float(latest["high"] - latest["low"])
+    latest_close_location = (
+        (latest_close - float(latest["low"])) / latest_range
+        if latest_range > 0.0 else 0.0
+    )
+    # The first bar may be the reclaim itself.  The second must hold MA13,
+    # avoid a weak close, and not show materially smaller follow-through.
+    return bool(
+        first_close >= ma13 * (1.0 - INTRADAY_STAND_TOLERANCE)
+        and latest_close >= ma13 * (1.0 + 0.001)
+        and float(latest["low"]) >= ma13 * (1.0 - INTRADAY_STAND_TOLERANCE)
+        and latest_close >= first_close * 0.998
+        and latest_close >= float(latest["open"])
+        and latest_close_location >= 0.55
+        and float(latest["volume"]) >= (
+            INTRADAY_ENTRY_MIN_RECLAIM_VOLUME_RATIO
+            * float(previous["volume"])
+        )
+    )
+
+
+def intraday_entry_target_shares(snapshot, style_exposures, candidate, price):
+    if price <= 0.0:
+        return 0
+    style = (candidate or {}).get("style")
+    exposure = float((style_exposures or {}).get(style, 0.0))
+    if exposure <= 0.0:
+        return 0
+    positions = _managed_positions(snapshot)
+    held_count = 0
+    candidate_map = {
+        item.get("code"): item for item in getattr(A, "target_candidates", [])
+    }
+    for code, position in positions.items():
+        if int(position.get("volume", 0)) <= 0:
+            continue
+        if (candidate_map.get(code) or {}).get("style") == style:
+            held_count += 1
+    base = target_shares(
+        float(snapshot.get("balance", 0.0)), exposure,
+        max(1, held_count + 1), price, MAX_STOCK_WEIGHT,
+    )
+    return int(base * INTRADAY_ENTRY_POSITION_SCALE / 100.0) * 100
+
+
+def _attempt_intraday_ma13_entry(context, snapshot, candidate, bars30,
+                                 trade_date, execution_price):
+    """Submit one small starter only after the live MA13 reclaim is confirmed."""
+    code = candidate.get("code")
+    metrics = intraday_entry_daily_metrics(candidate)
+    price = float(execution_price or 0.0)
+    if not code or not intraday_ma13_reclaim_entry_signal(bars30, metrics):
+        return False
+    if not buy_entry_price_allowed(price, candidate):
+        print("SKIP_INTRADAY_ENTRY", trade_date, code, "price_guard",
+              round(price, 4))
+        return False
+    volume = intraday_entry_target_shares(
+        snapshot, A.current_style_exposures, candidate, price
+    )
+    affordable = int(
+        float(snapshot.get("available_cash", 0.0)) * 0.98
+        / max(price, 1e-12) / 100.0
+    ) * 100
+    volume = min(volume, affordable)
+    if volume < 100:
+        return False
+    if not _send_order(
+            context, "buy", code, volume, trade_date,
+            "intraday_ma13_reclaim", price,
+            entry_max_execution_price(candidate)):
+        return False
+    candidate["entry_ready"] = True
+    candidate["entry_status"] = "READY"
+    candidate.setdefault("feature", {})["entry_setup"] = "intraday_ma13_reclaim"
+    if code not in {item.get("code") for item in A.target_candidates}:
+        A.target_candidates.append(candidate)
+    A.entry_scales[code] = INTRADAY_ENTRY_POSITION_SCALE
+    A.desired_shares[code] = volume
+    A.intraday_entry_pending_codes.discard(code)
+    A.position_meta[code] = {
+        "entry_price": price,
+        "below_ma13_days": 0,
+        "ma13_reduced": False,
+        "style": candidate.get("style"),
+        "sector": candidate.get("sector"),
+    }
+    print(
+        "INTRADAY_ENTRY", trade_date, code, "ma13_reclaim",
+        "support", round(float(metrics["ma13"]), 4),
+        "price", round(price, 4), "volume", volume,
+    )
+    return True
+
+
 def first_hour_daily_support_confirmed(frame30, trade_date, support):
     """Return None before 10:30, otherwise confirm two bars over a daily MA."""
     if frame30 is None or frame30.empty or float(support) <= 0.0:
@@ -1978,6 +2122,33 @@ def _low_volume_exhaustion_fade(data):
     return False
 
 
+def _low_volume_extension_fade(data, ma7):
+    """Sell a failed, low-volume retest that is already far above daily MA7."""
+    if data is None or len(data) < 22 or float(ma7) <= 0.0:
+        return False
+    previous = data.iloc[-2]
+    latest = data.iloc[-1]
+    if pd.Timestamp(previous.name).date() != pd.Timestamp(latest.name).date():
+        return False
+    base_volume = float(np.mean(np.asarray(
+        data["volume"].iloc[-22:-2], dtype=float,
+    )))
+    price_range = float(previous["high"] - previous["low"])
+    if base_volume <= 0.0 or price_range <= 0.0:
+        return False
+    upper_shadow = float(previous["high"] - max(
+        previous["open"], previous["close"]
+    ))
+    return bool(
+        float(previous["high"]) / float(ma7) - 1.0
+        >= INTRADAY_EXTENSION_MIN_DISTANCE_MA7
+        and float(previous["volume"])
+        <= INTRADAY_EXTENSION_MAX_VOLUME_RATIO * base_volume
+        and upper_shadow >= 0.35 * price_range
+        and float(latest["close"]) < float(previous["low"])
+    )
+
+
 def intraday_action(frame30, ma7, ma13, reduced, trend_ready=True,
                     addback_stage=0, addback_age=0,
                     ma7_add_ready=False):
@@ -2026,7 +2197,8 @@ def intraday_action(frame30, ma7, ma13, reduced, trend_ready=True,
     if (float(previous["volume"]) >= 1.8 * base_volume
             and reversal_bar and confirmed):
         return "reduce"
-    if _low_volume_exhaustion_fade(data):
+    if (_low_volume_exhaustion_fade(data)
+            or _low_volume_extension_fade(data, ma7)):
         return "reduce_exhaustion"
     return None
 
@@ -2957,6 +3129,7 @@ def _buy_is_tradeable(code, tick):
 def entry_raw_price_levels(candidate):
     feature = (candidate or {}).get("feature", {})
     ma7 = float(feature.get("ma7", 0.0))
+    ma13 = float(feature.get("ma13", 0.0))
     signal_close = float(feature.get("close", 0.0))
     ma40 = float(feature.get("ma40", 0.0))
     raw_signal_close = float(feature.get("raw_signal_close", 0.0))
@@ -2966,12 +3139,74 @@ def entry_raw_price_levels(candidate):
     raw_per_adjusted = raw_signal_close / signal_close
     if not np.isfinite(raw_per_adjusted) or raw_per_adjusted <= 0.0:
         return None
-    return {
+    result = {
         "ma7": ma7 * raw_per_adjusted,
         "ma40": ma40 * raw_per_adjusted,
         "signal_close": raw_signal_close,
         "raw_per_adjusted": raw_per_adjusted,
     }
+    if ma13 > 0.0:
+        result["ma13"] = ma13 * raw_per_adjusted
+    return result
+
+
+def intraday_entry_daily_metrics(candidate):
+    """Convert a daily candidate's support levels to raw intraday prices."""
+    feature = (candidate or {}).get("feature", {})
+    levels = entry_raw_price_levels(candidate)
+    if levels is None or float(levels.get("ma13", 0.0)) <= 0.0:
+        return None
+    result = dict(feature)
+    result.update({
+        "ma7": float(levels["ma7"]),
+        "ma13": float(levels["ma13"]),
+        "ma40": float(levels["ma40"]),
+        "close": float(levels["signal_close"]),
+    })
+    raw_per_adjusted = float(levels["raw_per_adjusted"])
+    for field in ("low", "high", "previous_high", "recent_peak_price",
+                  "previous_peak_price", "atr"):
+        value = float(feature.get(field, 0.0))
+        if value > 0.0:
+            result[field] = value * raw_per_adjusted
+    return result
+
+
+def intraday_entry_watch_eligible(candidate):
+    """Keep a broad but structurally sound pool for same-day MA13 reclaims."""
+    feature = (candidate or {}).get("feature", {})
+    ma7 = float(feature.get("ma7", 0.0))
+    ma13 = float(feature.get("ma13", 0.0))
+    ma40 = float(feature.get("ma40", 0.0))
+    if not (ma7 > ma13 > ma40 > 0.0):
+        return False
+    if float(feature.get("ma13_slope3", 0.0)) < PULLBACK_MIN_MA13_SLOPE_3D:
+        return False
+    if float(feature.get("ma40_slope5", 0.0)) < 0.0:
+        return False
+    if float(feature.get("distance_ma40", 1.0)) > FIRST_MA13_PULLBACK_MAX_DISTANCE_MA40:
+        return False
+    if float(candidate.get("strength_score", 0.0)) > ENTRY_MAX_STRENGTH_SCORE:
+        return False
+    return intraday_entry_daily_metrics(candidate) is not None
+
+
+def intraday_entry_watch_candidates(candidates):
+    grouped = {}
+    for item in candidates or []:
+        if intraday_entry_watch_eligible(item):
+            grouped.setdefault(item.get("style"), []).append(item)
+    selected = []
+    for items in grouped.values():
+        items.sort(
+            key=lambda item: (
+                float(item.get("entry_score", 0.0)),
+                float(item.get("strength_fit_score", 0.0)),
+                float(item.get("score", 0.0)),
+            ), reverse=True,
+        )
+        selected.extend(items[:INTRADAY_ENTRY_WATCH_PER_STYLE])
+    return selected
 
 
 def entry_max_execution_price(candidate):
@@ -3232,6 +3467,10 @@ def _rebalance_to_desired(context, snapshot, trade_date,
             continue
         volume = int((desired - current) / 100) * 100
         if volume <= 0 or code in sold_codes:
+            continue
+        if (current <= 0
+                and code in getattr(A, "intraday_entry_pending_codes", set())):
+            print("WAIT_INTRADAY_ENTRY", trade_date, code, "ma13_reclaim")
             continue
         price = _execution_price(
             code, candidate_map, tick_map, "buy", A.execution_prices
@@ -3648,12 +3887,23 @@ def run_intraday_cycle(context, end_time, trade_date):
         return
     positions = _managed_positions(snapshot)
     candidate_map = {item["code"]: item for item in A.target_candidates}
-    intraday_codes = (
-        set(candidate_map.keys())
-        | set(A.build_plans.keys())
-        | set(A.build_confirm_plans.keys())
+    entry_watch = intraday_entry_watch_candidates(
+        getattr(A, "reserve_candidates", [])
     )
-    codes = sorted(set(positions.keys()) & intraday_codes)
+    for item in entry_watch:
+        candidate_map.setdefault(item["code"], item)
+    position_codes = (
+        set(positions.keys()) & (
+            set(candidate_map.keys())
+            | set(A.build_plans.keys())
+            | set(A.build_confirm_plans.keys())
+        )
+    )
+    entry_codes = {
+        item["code"] for item in entry_watch
+        if item["code"] not in positions
+    }
+    codes = sorted(position_codes | entry_codes)
     if not codes:
         return
     history = fetch_history(
@@ -3663,10 +3913,19 @@ def run_intraday_cycle(context, end_time, trade_date):
     )
     tick_map = _simulation_tick(context, codes)
     execution_prices = _raw_execution_prices(context, codes, "close")
+    pending_codes = _pending_order_codes()
     for code in codes:
         candidate = candidate_map.get(code)
         feature = (candidate or {}).get("feature", {})
         bars30 = aggregate_5m_to_30m(history.get(code))
+        if code not in positions:
+            if code in pending_codes:
+                continue
+            _attempt_intraday_ma13_entry(
+                context, snapshot, candidate, bars30, trade_date,
+                execution_prices.get(code),
+            )
+            continue
         daily_metrics = A.daily_position_metrics.get(code, feature)
 
         confirm_plan = A.build_confirm_plans.get(code)
@@ -4103,6 +4362,11 @@ def run_daily_cycle(context, asof, trade_date):
             "removed", sorted(previous_entry_ready - current_entry_ready),
         )
     A.entry_ready_codes = set(current_entry_ready)
+    candidate_map = {item["code"]: item for item in A.target_candidates}
+    A.intraday_entry_pending_codes = {
+        code for code in current_entry_ready
+        if entry_requires_intraday_ma13_confirmation(candidate_map.get(code))
+    }
 
     risk_allocation_changed = (
         style_exposures != A.current_style_exposures
@@ -4236,6 +4500,7 @@ def init(context):
     A.active_sectors = []
     A.sector_ma40_broken = set()
     A.entry_ready_codes = set()
+    A.intraday_entry_pending_codes = set()
     A.desired_shares = {}
     A.position_meta = {}
     A.intraday_scales = {}
