@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.4.3_20260811_MA13_EXIT_BOTTOM_CROSS
+# DOWNLOAD_BUILD: V2.4.4_20260812_FIRST_MA13_PULLBACK
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_3"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_4"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -89,6 +89,16 @@ PULLBACK_MIN_MA13_SLOPE_3D = 0.0005
 PULLBACK_MIN_GAP_RATIO = 0.60
 PULLBACK_MAX_GAP_RATIO = 2.40
 PULLBACK_BREAKOUT_MAX_DISTANCE_MA7 = 0.06
+FIRST_MA13_PULLBACK_POSITION_SCALE = 0.40
+FIRST_MA13_PULLBACK_MIN_SCORE = 60.0
+FIRST_MA13_PULLBACK_MIN_PEAK_EXTENSION = 0.06
+FIRST_MA13_PULLBACK_MIN_DEPTH = 0.05
+FIRST_MA13_PULLBACK_MAX_DAYS_FROM_PEAK = 5
+FIRST_MA13_PULLBACK_MAX_MA7_ROLLOVER = -0.015
+FIRST_MA13_PULLBACK_SUPPORT_TOLERANCE = 0.03
+FIRST_MA13_PULLBACK_MIN_REBOUND_ATR = 0.35
+FIRST_MA13_PULLBACK_MIN_AMOUNT_RATIO = 0.60
+FIRST_MA13_PULLBACK_MAX_AMOUNT_RATIO = 1.80
 BOTTOM_CROSS_POSITION_SCALE = 0.25
 BOTTOM_CROSS_MAX_MA7_MA13_GAP = 0.015
 BOTTOM_CROSS_MIN_MA7_SLOPE_3D = 0.004
@@ -739,7 +749,9 @@ def ma_slopes_in_flow_zone(slope7, slope13, slope40):
 
 
 def _is_pullback_setup(setup):
-    return str(setup or "") in ("ma7_pullback", "ma13_rebound")
+    return str(setup or "") in (
+        "ma7_pullback", "ma13_rebound", "first_ma13_pullback"
+    )
 
 
 def _is_starter_setup(setup):
@@ -750,6 +762,8 @@ def _is_starter_setup(setup):
 
 def entry_setup_scale(setup):
     """Keep support entries small until their continuation is confirmed."""
+    if str(setup or "") == "first_ma13_pullback":
+        return FIRST_MA13_PULLBACK_POSITION_SCALE
     if _is_pullback_setup(setup):
         return PULLBACK_POSITION_SCALE
     if str(setup or "") == "bottom_cross_starter":
@@ -820,6 +834,37 @@ def entry_setup_kind(metrics):
     )
     if ma7_pullback:
         return "ma7_pullback"
+
+    # The first sizeable retracement to MA13 after a short, extended leg is
+    # allowed to tolerate a temporarily falling MA7.  It needs fresh support
+    # (no earlier MA13 touch), a rebound candle and non-panic volume.
+    first_ma13_pullback = bool(
+        close >= ma13 and ma7 > ma13 > ma40
+        and ma13 > ma13_prev and ma40 > ma40_prev
+        and slope7 >= FIRST_MA13_PULLBACK_MAX_MA7_ROLLOVER
+        and slope13 >= PULLBACK_MIN_MA13_SLOPE_3D
+        and low >= ma13 * (1.0 - FIRST_MA13_PULLBACK_SUPPORT_TOLERANCE)
+        and low <= ma13 * (1.0 + PULLBACK_SUPPORT_RECLAIM_TOLERANCE)
+        and distance40 <= PULLBACK_MAX_DISTANCE_MA40
+        and ma_gap_ratio_in_flow_zone(gap7, gap13, 0.45, 2.80)
+        and float(metrics.get("first_pullback_score", 0.0))
+        >= FIRST_MA13_PULLBACK_MIN_SCORE
+        and float(metrics.get("first_pullback_peak_extension", 0.0))
+        >= FIRST_MA13_PULLBACK_MIN_PEAK_EXTENSION
+        and int(metrics.get("first_pullback_days_from_peak", 0))
+        <= FIRST_MA13_PULLBACK_MAX_DAYS_FROM_PEAK
+        and float(metrics.get("first_pullback_depth", 0.0))
+        >= FIRST_MA13_PULLBACK_MIN_DEPTH
+        and int(metrics.get("first_pullback_prior_touches", 1)) == 0
+        and float(metrics.get("first_pullback_rebound_atr", 0.0))
+        >= FIRST_MA13_PULLBACK_MIN_REBOUND_ATR
+        and float(metrics.get("first_pullback_close_location", 0.0)) >= 0.50
+        and FIRST_MA13_PULLBACK_MIN_AMOUNT_RATIO
+        <= float(metrics.get("first_pullback_amount_ratio", 0.0))
+        <= FIRST_MA13_PULLBACK_MAX_AMOUNT_RATIO
+    )
+    if first_ma13_pullback:
+        return "first_ma13_pullback"
 
     # MA13 is the deeper, higher-probability support in an intact trend.  It
     # must show a same-day recovery; a bare close below MA13 is not a signal.
@@ -937,6 +982,91 @@ def effective_amount_metrics(data, code=""):
     )
 
 
+def first_ma13_pullback_metrics(data, atr):
+    """Measure the first deep MA13 retest after a short, extended advance."""
+    empty = {
+        "first_pullback_score": 0.0,
+        "first_pullback_peak_extension": 0.0,
+        "first_pullback_days_from_peak": 0,
+        "first_pullback_depth": 0.0,
+        "first_pullback_prior_touches": 0,
+        "first_pullback_rebound_atr": 0.0,
+        "first_pullback_close_location": 0.0,
+        "first_pullback_amount_ratio": 0.0,
+    }
+    if data is None or len(data) < 25:
+        return empty
+    required = ["close", "high", "low", "amount"]
+    if any(field not in data.columns for field in required):
+        return empty
+    close = np.asarray(data["close"], dtype=float)
+    high = np.asarray(data["high"], dtype=float)
+    low = np.asarray(data["low"], dtype=float)
+    amount = np.asarray(data["amount"], dtype=float)
+    if (not np.all(np.isfinite(close[-15:]))
+            or not np.all(np.isfinite(high[-15:]))
+            or not np.all(np.isfinite(low[-15:]))):
+        return empty
+    ma7_series = pd.Series(close).rolling(7).mean().to_numpy()
+    ma13_series = pd.Series(close).rolling(13).mean().to_numpy()
+    end = len(close) - 1
+    start = max(12, end - 12)
+    peak_slice = high[start:end]
+    if len(peak_slice) <= 0:
+        return empty
+    peak_index = start + int(np.argmax(peak_slice))
+    peak = float(high[peak_index])
+    peak_ma7 = float(ma7_series[peak_index])
+    days_from_peak = end - peak_index
+    peak_extension = peak / peak_ma7 - 1.0 if peak_ma7 > 0.0 else 0.0
+    depth = 1.0 - float(low[-1]) / peak if peak > 0.0 else 0.0
+    touch_start = max(12, end - 10)
+    prior_touches = 0
+    for index in range(touch_start, end):
+        support = float(ma13_series[index])
+        if support > 0.0 and low[index] <= support * 1.02:
+            prior_touches += 1
+    daily_range = float(high[-1] - low[-1])
+    close_location = (
+        (float(close[-1]) - float(low[-1])) / daily_range
+        if daily_range > 0.0 else 0.0
+    )
+    rebound_atr = (
+        (float(close[-1]) - float(low[-1])) / float(atr)
+        if np.isfinite(atr) and float(atr) > 0.0 else 0.0
+    )
+    previous_amount = float(np.mean(amount[-6:-1]))
+    amount_ratio = float(amount[-1]) / previous_amount if previous_amount > 0 else 0.0
+
+    score = 0.0
+    score += 20.0 * min(1.0, max(
+        0.0, peak_extension / FIRST_MA13_PULLBACK_MIN_PEAK_EXTENSION
+    ))
+    score += 15.0 if 1 <= days_from_peak <= FIRST_MA13_PULLBACK_MAX_DAYS_FROM_PEAK else 0.0
+    score += 15.0 * min(1.0, max(
+        0.0, depth / FIRST_MA13_PULLBACK_MIN_DEPTH
+    ))
+    score += 15.0 if prior_touches == 0 else max(0.0, 10.0 - 5.0 * prior_touches)
+    score += 20.0 * min(1.0, max(0.0, rebound_atr / FIRST_MA13_PULLBACK_MIN_REBOUND_ATR))
+    score += 10.0 * min(1.0, max(0.0, close_location / 0.60))
+    score += 5.0 if (
+        FIRST_MA13_PULLBACK_MIN_AMOUNT_RATIO
+        <= amount_ratio <= FIRST_MA13_PULLBACK_MAX_AMOUNT_RATIO
+    ) else 0.0
+    result = dict(empty)
+    result.update({
+        "first_pullback_score": round(score, 4),
+        "first_pullback_peak_extension": peak_extension,
+        "first_pullback_days_from_peak": days_from_peak,
+        "first_pullback_depth": depth,
+        "first_pullback_prior_touches": prior_touches,
+        "first_pullback_rebound_atr": rebound_atr,
+        "first_pullback_close_location": close_location,
+        "first_pullback_amount_ratio": amount_ratio,
+    })
+    return result
+
+
 def stock_feature(frame, sector_return13, sector_return40,
                   min_average_amount=50000000.0,
                   require_entry_setup=True, code="",
@@ -994,6 +1124,7 @@ def stock_feature(frame, sector_return13, sector_return40,
     )
     high_proximity = close[-1] / high40 if high40 > 0 else 0.0
     atr = _atr(data, 14)
+    first_pullback = first_ma13_pullback_metrics(data, atr)
 
     entry_setup = entry_setup_kind({
         "close": close[-1], "low": latest_low,
@@ -1007,6 +1138,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "distance_ma40": distance_ma40,
         "ma7_ma13_gap": ma7_ma13_gap,
         "ma13_ma40_gap": ma13_ma40_gap,
+        **first_pullback,
     })
     if (liquidity_days20 < MIN_LIQUIDITY_SAMPLE_DAYS
             or average_amount < float(min_average_amount)):
@@ -1071,6 +1203,7 @@ def stock_feature(frame, sector_return13, sector_return40,
         "previous_high": previous_high,
         "volatility": volatility,
         "atr": atr,
+        **first_pullback,
     }
 
 
@@ -3382,6 +3515,26 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
               item.get("entry_status", "WAIT"))
              for item in spectators],
         )
+    pullback_scan = []
+    for item in candidates or []:
+        feature = item.get("feature", {})
+        score = float(feature.get("first_pullback_score", 0.0))
+        if score < 40.0:
+            continue
+        pullback_scan.append((
+            item.get("code"), round(score, 2),
+            int(feature.get("first_pullback_days_from_peak", 0)),
+            round(float(feature.get("first_pullback_peak_extension", 0.0)), 4),
+            round(float(feature.get("first_pullback_depth", 0.0)), 4),
+            int(feature.get("first_pullback_prior_touches", 0)),
+            round(float(feature.get("first_pullback_rebound_atr", 0.0)), 2),
+            round(float(feature.get("first_pullback_amount_ratio", 0.0)), 2),
+            feature.get("entry_setup"), item.get("entry_status"),
+        ))
+    if pullback_scan:
+        print("PULLBACK_SCAN", sorted(
+            pullback_scan, key=lambda item: item[1], reverse=True
+        ))
     if ready:
         print(
             "TARGETS",
