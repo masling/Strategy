@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.4.5_20260812_PULLBACK_DIGESTION
+# DOWNLOAD_BUILD: V2.4.6_20260812_POST_PEAK_MA13_TOUCH
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_5"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_6"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -101,6 +101,8 @@ FIRST_MA13_PULLBACK_SUPPORT_TOLERANCE = 0.03
 FIRST_MA13_PULLBACK_MIN_REBOUND_ATR = 0.35
 FIRST_MA13_PULLBACK_MIN_AMOUNT_RATIO = 0.60
 FIRST_MA13_PULLBACK_MAX_AMOUNT_RATIO = 1.80
+FIRST_MA13_PULLBACK_MAX_DISTANCE_MA40 = 0.16
+FIRST_MA13_PULLBACK_MAX_GAP_RATIO = 3.00
 BOTTOM_CROSS_POSITION_SCALE = 0.25
 BOTTOM_CROSS_MAX_MA7_MA13_GAP = 0.015
 BOTTOM_CROSS_MIN_MA7_SLOPE_3D = 0.004
@@ -847,8 +849,10 @@ def entry_setup_kind(metrics):
         and slope13 >= PULLBACK_MIN_MA13_SLOPE_3D
         and low >= ma13 * (1.0 - FIRST_MA13_PULLBACK_SUPPORT_TOLERANCE)
         and low <= ma13 * (1.0 + PULLBACK_SUPPORT_RECLAIM_TOLERANCE)
-        and distance40 <= PULLBACK_MAX_DISTANCE_MA40
-        and ma_gap_ratio_in_flow_zone(gap7, gap13, 0.45, 2.80)
+        and distance40 <= FIRST_MA13_PULLBACK_MAX_DISTANCE_MA40
+        and ma_gap_ratio_in_flow_zone(
+            gap7, gap13, 0.45, FIRST_MA13_PULLBACK_MAX_GAP_RATIO
+        )
         and float(metrics.get("first_pullback_score", 0.0))
         >= FIRST_MA13_PULLBACK_MIN_SCORE
         and float(metrics.get("first_pullback_peak_extension", 0.0))
@@ -1030,11 +1034,14 @@ def first_ma13_pullback_metrics(data, atr):
     days_from_peak = end - peak_index
     peak_extension = peak / peak_ma7 - 1.0 if peak_ma7 > 0.0 else 0.0
     depth = 1.0 - float(low[-1]) / peak if peak > 0.0 else 0.0
-    touch_start = max(12, end - 10)
+    # Count a first MA13 retest only after the local peak. Earlier proximity
+    # during the advance must not turn the first correction into a retest.
+    touch_start = max(peak_index + 1, 12, end - 10)
+    touch_upper = 1.0 + PULLBACK_SUPPORT_RECLAIM_TOLERANCE
     prior_touches = 0
     for index in range(touch_start, end):
         support = float(ma13_series[index])
-        if support > 0.0 and low[index] <= support * 1.02:
+        if support > 0.0 and low[index] <= support * touch_upper:
             prior_touches += 1
     daily_range = float(high[-1] - low[-1])
     close_location = (
@@ -2933,9 +2940,14 @@ def entry_max_execution_price(candidate):
         if _is_pullback_setup(setup)
         else ENTRY_MAX_DISTANCE_MA7
     )
+    max_distance_ma40 = (
+        FIRST_MA13_PULLBACK_MAX_DISTANCE_MA40
+        if setup == "first_ma13_pullback"
+        else ENTRY_MAX_DISTANCE_MA40
+    )
     return min(
         levels["ma7"] * (1.0 + max_distance),
-        levels["ma40"] * (1.0 + ENTRY_MAX_DISTANCE_MA40),
+        levels["ma40"] * (1.0 + max_distance_ma40),
         levels["signal_close"] * (1.0 + ENTRY_MAX_EXECUTION_GAP),
     )
 

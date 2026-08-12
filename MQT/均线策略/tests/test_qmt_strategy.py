@@ -611,6 +611,50 @@ class StockSelectionTests(unittest.TestCase):
         self.assertEqual(setup, "first_ma13_pullback")
         self.assertEqual(invoke("entry_setup_scale", setup), 0.40)
 
+    def test_first_deep_ma13_pullback_has_its_own_ma40_distance_cap(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 101.0, "low": 99.8, "previous_high": 106.0,
+            "ma7": 105.0, "ma7_prev1": 105.6, "ma7_prev2": 106.4,
+            "ma13": 100.0, "ma13_prev1": 99.5, "ma13_prev": 98.7,
+            "ma40": 87.4, "ma40_prev": 86.7,
+            "ma7_slope3": -0.004, "ma13_slope3": 0.008,
+            "ma40_slope5": 0.005,
+            "distance_ma40": 0.156,
+            "ma7_ma13_gap": 105.0 / 100.0 - 1.0,
+            "ma13_ma40_gap": 100.0 / 87.4 - 1.0,
+            "first_pullback_score": 76.0,
+            "first_pullback_peak_extension": 0.10,
+            "first_pullback_days_from_peak": 3,
+            "first_pullback_depth": 0.08,
+            "first_pullback_prior_touches": 0,
+            "first_pullback_rebound_atr": 0.9,
+            "first_pullback_close_location": 0.70,
+            "first_pullback_amount_ratio": 1.10,
+        })
+        self.assertEqual(setup, "first_ma13_pullback")
+
+    def test_first_deep_ma13_pullback_has_its_own_gap_speed_cap(self):
+        setup = invoke("entry_setup_kind", {
+            "close": 101.0, "low": 99.8, "previous_high": 106.0,
+            "ma7": 105.0, "ma7_prev1": 105.6, "ma7_prev2": 106.4,
+            "ma13": 100.0, "ma13_prev1": 99.5, "ma13_prev": 98.7,
+            "ma40": 92.0, "ma40_prev": 91.2,
+            "ma7_slope3": -0.004, "ma13_slope3": 0.008,
+            "ma40_slope5": 0.005,
+            "distance_ma40": 101.0 / 92.0 - 1.0,
+            "ma7_ma13_gap": 0.060,
+            "ma13_ma40_gap": 0.095,
+            "first_pullback_score": 76.0,
+            "first_pullback_peak_extension": 0.10,
+            "first_pullback_days_from_peak": 3,
+            "first_pullback_depth": 0.08,
+            "first_pullback_prior_touches": 0,
+            "first_pullback_rebound_atr": 0.9,
+            "first_pullback_close_location": 0.70,
+            "first_pullback_amount_ratio": 1.10,
+        })
+        self.assertEqual(setup, "first_ma13_pullback")
+
     def test_first_deep_ma13_pullback_rejects_second_support_touch(self):
         setup = invoke("entry_setup_kind", {
             "close": 101.0, "low": 99.8, "previous_high": 106.0,
@@ -632,6 +676,37 @@ class StockSelectionTests(unittest.TestCase):
             "first_pullback_amount_ratio": 1.10,
         })
         self.assertIsNone(setup)
+
+    def test_first_pullback_touch_count_ignores_pre_peak_ma13_proximity(self):
+        close = np.arange(100.0, 155.0)
+        high = close * 1.01
+        low = close * 0.99
+        ma13 = pd.Series(close).rolling(13).mean().to_numpy()
+        # A normal near-MA13 fluctuation before the local peak must not turn
+        # the later first correction into a “second” pullback.
+        low[42] = ma13[42] * 1.01
+        high[50] = high[50] * 1.10
+        frame = pd.DataFrame({
+            "close": close, "high": high, "low": low,
+            "amount": np.repeat(100000000.0, len(close)),
+        })
+        metrics = invoke("first_ma13_pullback_metrics", frame, 3.0) or {}
+        self.assertEqual(metrics["first_pullback_days_from_peak"], 4)
+        self.assertEqual(metrics["first_pullback_prior_touches"], 0)
+
+    def test_first_pullback_touch_count_keeps_a_post_peak_support_test(self):
+        close = np.arange(100.0, 155.0)
+        high = close * 1.01
+        low = close * 0.99
+        ma13 = pd.Series(close).rolling(13).mean().to_numpy()
+        high[50] = high[50] * 1.10
+        low[52] = ma13[52] * 1.005
+        frame = pd.DataFrame({
+            "close": close, "high": high, "low": low,
+            "amount": np.repeat(100000000.0, len(close)),
+        })
+        metrics = invoke("first_ma13_pullback_metrics", frame, 3.0) or {}
+        self.assertEqual(metrics["first_pullback_prior_touches"], 1)
 
     def test_first_deep_ma13_pullback_requires_time_or_turnover_digestion(self):
         metrics = {
@@ -1293,6 +1368,21 @@ class RiskAndSizingTests(unittest.TestCase):
         self.assertTrue(invoke("buy_entry_price_allowed", 105.0, candidate))
         self.assertFalse(invoke("buy_entry_price_allowed", 107.0, candidate))
         self.assertFalse(invoke("buy_entry_price_allowed", 109.5, candidate))
+
+    def test_first_deep_ma13_pullback_execution_matches_its_ma40_cap(self):
+        candidate = {"feature": {
+            "entry_setup": "first_ma13_pullback", "close": 105.0,
+            "ma7": 120.0, "ma40": 90.0,
+            "raw_signal_close": 105.0,
+        }}
+        maximum = invoke("entry_max_execution_price", candidate)
+        self.assertAlmostEqual(maximum, 104.4)
+        self.assertTrue(invoke(
+            "buy_entry_price_allowed", maximum - 0.0001, candidate
+        ))
+        self.assertFalse(invoke(
+            "buy_entry_price_allowed", maximum + 0.0001, candidate
+        ))
 
     def test_shengtun_october_gap_open_is_not_a_valid_entry_price(self):
         candidate = {"feature": {
