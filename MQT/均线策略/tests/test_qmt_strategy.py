@@ -1461,6 +1461,31 @@ class IntradayAggregationTests(unittest.TestCase):
             invoke("intraday_action", frame, 9.5, 9.0, False), "reduce"
         )
 
+    def test_low_volume_failed_retest_reduces_trading_position(self):
+        history_index = list(pd.date_range("2026-07-01 14:30", periods=21, freq="D"))
+        index = pd.DatetimeIndex(history_index + [
+            pd.Timestamp("2026-08-03 10:00"),
+            pd.Timestamp("2026-08-03 10:30"),
+            pd.Timestamp("2026-08-03 11:00"),
+        ])
+        frame = pd.DataFrame({
+            "open": np.repeat(10.0, 24),
+            "high": np.repeat(10.2, 24),
+            "low": np.repeat(9.8, 24),
+            "close": np.repeat(10.0, 24),
+            "volume": np.repeat(100.0, 24),
+            "amount": np.repeat(1000.0, 24),
+        }, index=index)
+        # High-volume push, then a higher but weak upper-shadow retest on
+        # less than half its volume, followed by a close below the retest low.
+        frame.iloc[-3] = [10.0, 11.0, 9.9, 10.8, 300.0, 3000.0]
+        frame.iloc[-2] = [10.8, 11.1, 10.6, 10.65, 120.0, 1200.0]
+        frame.iloc[-1] = [10.65, 10.7, 10.4, 10.5, 90.0, 900.0]
+        self.assertEqual(
+            invoke("intraday_action", frame, 9.5, 9.0, False),
+            "reduce_exhaustion",
+        )
+
     def test_intraday_top_requires_profit_and_distance_from_daily_mas(self):
         metrics = {
             "ma7": 10.0, "ma13": 9.7, "ma40": 9.0,

@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.4.6_20260812_POST_PEAK_MA13_TOUCH
+# DOWNLOAD_BUILD: V2.4.7_20260812_INTRADAY_EXHAUSTION_FADE
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_6"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_7"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -38,6 +38,9 @@ REGIME_EXIT_CAP = 0.15
 MAX_TOTAL_EXPOSURE = 0.80
 INTRADAY_REDUCE_RATIO = 1.0 / 3.0
 INTRADAY_REDUCE_MIN_PROFIT = 0.03
+INTRADAY_EXHAUSTION_IMPULSE_VOLUME_RATIO = 2.50
+INTRADAY_EXHAUSTION_FADE_VOLUME_RATIO = 0.50
+INTRADAY_EXHAUSTION_UPPER_SHADOW_RATIO = 0.50
 WATCHLIST_MAX_DISTANCE_MA40 = 0.25
 WATCHLIST_MIN_MA13_SLOPE_3D = -0.003
 WATCHLIST_MIN_HIGH_PROXIMITY = 0.80
@@ -1933,6 +1936,47 @@ def _confirmed_30m_reversal(previous, latest):
     )
 
 
+def _low_volume_exhaustion_fade(data):
+    """Detect an intraday high-volume push, weak retest, then failed hold."""
+    if data is None or len(data) < 24:
+        return False
+    latest_index = len(data) - 1
+    latest = data.iloc[latest_index]
+    for impulse_index in (latest_index - 3, latest_index - 2):
+        fade_index = impulse_index + 1
+        if fade_index >= latest_index:
+            continue
+        impulse = data.iloc[impulse_index]
+        fade = data.iloc[fade_index]
+        if (pd.Timestamp(impulse.name).date()
+                != pd.Timestamp(fade.name).date()
+                or pd.Timestamp(fade.name).date()
+                != pd.Timestamp(latest.name).date()):
+            continue
+        baseline = float(np.mean(np.asarray(
+            data["volume"].iloc[impulse_index - 20:impulse_index],
+            dtype=float,
+        )))
+        price_range = float(fade["high"] - fade["low"])
+        if baseline <= 0.0 or price_range <= 0.0:
+            continue
+        upper_shadow = float(fade["high"] - max(fade["open"], fade["close"]))
+        failed_retest = bool(
+            float(fade["high"]) >= float(impulse["high"])
+            and upper_shadow >= INTRADAY_EXHAUSTION_UPPER_SHADOW_RATIO * price_range
+            and float(fade["volume"]) <= (
+                INTRADAY_EXHAUSTION_FADE_VOLUME_RATIO
+                * float(impulse["volume"])
+            )
+        )
+        if (float(impulse["volume"])
+                >= INTRADAY_EXHAUSTION_IMPULSE_VOLUME_RATIO * baseline
+                and failed_retest
+                and float(latest["close"]) < float(fade["low"])):
+            return True
+    return False
+
+
 def intraday_action(frame30, ma7, ma13, reduced, trend_ready=True,
                     addback_stage=0, addback_age=0,
                     ma7_add_ready=False):
@@ -1981,6 +2025,8 @@ def intraday_action(frame30, ma7, ma13, reduced, trend_ready=True,
     if (float(previous["volume"]) >= 1.8 * base_volume
             and reversal_bar and confirmed):
         return "reduce"
+    if _low_volume_exhaustion_fade(data):
+        return "reduce_exhaustion"
     return None
 
 
@@ -3699,7 +3745,7 @@ def run_intraday_cycle(context, end_time, trade_date):
                 int(build_plan.get("age", TREND_ADD_WINDOW_DAYS + 1)),
                 build_plan.get("setup", ""),
             )
-        if action == "reduce":
+        if action in ("reduce", "reduce_exhaustion"):
             current = int(positions[code].get("volume", 0))
             available = int(positions[code].get("available", 0))
             peak_price = (
@@ -3728,7 +3774,9 @@ def run_intraday_cycle(context, end_time, trade_date):
                 continue
             if _send_order(
                     context, "sell", code, volume, trade_date,
-                    "intraday_top", execution_prices.get(code)):
+                    ("intraday_exhaustion_top"
+                     if action == "reduce_exhaustion" else "intraday_top"),
+                    execution_prices.get(code)):
                 remaining_ratio = max(0.0, float(current - volume) / current)
                 A.intraday_scales[code] = remaining_ratio
                 A.desired_shares[code] = current - volume
