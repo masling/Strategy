@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.4.4_20260812_FIRST_MA13_PULLBACK
+# DOWNLOAD_BUILD: V2.4.5_20260812_PULLBACK_DIGESTION
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_4"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_5"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -93,8 +93,10 @@ FIRST_MA13_PULLBACK_POSITION_SCALE = 0.40
 FIRST_MA13_PULLBACK_MIN_SCORE = 60.0
 FIRST_MA13_PULLBACK_MIN_PEAK_EXTENSION = 0.06
 FIRST_MA13_PULLBACK_MIN_DEPTH = 0.05
+FIRST_MA13_PULLBACK_MIN_DAYS_FROM_PEAK = 3
 FIRST_MA13_PULLBACK_MAX_DAYS_FROM_PEAK = 5
-FIRST_MA13_PULLBACK_MAX_MA7_ROLLOVER = -0.015
+FIRST_MA13_PULLBACK_MIN_CORRECTION_TURNOVER_DAYS = 2.0
+FIRST_MA13_PULLBACK_MAX_MA7_ROLLOVER = -0.006
 FIRST_MA13_PULLBACK_SUPPORT_TOLERANCE = 0.03
 FIRST_MA13_PULLBACK_MIN_REBOUND_ATR = 0.35
 FIRST_MA13_PULLBACK_MIN_AMOUNT_RATIO = 0.60
@@ -853,6 +855,13 @@ def entry_setup_kind(metrics):
         >= FIRST_MA13_PULLBACK_MIN_PEAK_EXTENSION
         and int(metrics.get("first_pullback_days_from_peak", 0))
         <= FIRST_MA13_PULLBACK_MAX_DAYS_FROM_PEAK
+        and (
+            int(metrics.get("first_pullback_days_from_peak", 0))
+            >= FIRST_MA13_PULLBACK_MIN_DAYS_FROM_PEAK
+            or float(metrics.get(
+                "first_pullback_correction_turnover_days", 0.0
+            )) >= FIRST_MA13_PULLBACK_MIN_CORRECTION_TURNOVER_DAYS
+        )
         and float(metrics.get("first_pullback_depth", 0.0))
         >= FIRST_MA13_PULLBACK_MIN_DEPTH
         and int(metrics.get("first_pullback_prior_touches", 1)) == 0
@@ -993,6 +1002,7 @@ def first_ma13_pullback_metrics(data, atr):
         "first_pullback_rebound_atr": 0.0,
         "first_pullback_close_location": 0.0,
         "first_pullback_amount_ratio": 0.0,
+        "first_pullback_correction_turnover_days": 0.0,
     }
     if data is None or len(data) < 25:
         return empty
@@ -1037,12 +1047,26 @@ def first_ma13_pullback_metrics(data, atr):
     )
     previous_amount = float(np.mean(amount[-6:-1]))
     amount_ratio = float(amount[-1]) / previous_amount if previous_amount > 0 else 0.0
+    pre_peak_start = max(0, peak_index - 5)
+    pre_peak_amount = float(np.mean(amount[pre_peak_start:peak_index + 1]))
+    correction_amount = float(np.sum(amount[peak_index + 1:end + 1]))
+    correction_turnover_days = (
+        correction_amount / pre_peak_amount if pre_peak_amount > 0.0 else 0.0
+    )
+    digestion_ready = bool(
+        days_from_peak >= FIRST_MA13_PULLBACK_MIN_DAYS_FROM_PEAK
+        or correction_turnover_days
+        >= FIRST_MA13_PULLBACK_MIN_CORRECTION_TURNOVER_DAYS
+    )
 
     score = 0.0
     score += 20.0 * min(1.0, max(
         0.0, peak_extension / FIRST_MA13_PULLBACK_MIN_PEAK_EXTENSION
     ))
-    score += 15.0 if 1 <= days_from_peak <= FIRST_MA13_PULLBACK_MAX_DAYS_FROM_PEAK else 0.0
+    score += 15.0 if (
+        digestion_ready
+        and days_from_peak <= FIRST_MA13_PULLBACK_MAX_DAYS_FROM_PEAK
+    ) else 0.0
     score += 15.0 * min(1.0, max(
         0.0, depth / FIRST_MA13_PULLBACK_MIN_DEPTH
     ))
@@ -1063,6 +1087,7 @@ def first_ma13_pullback_metrics(data, atr):
         "first_pullback_rebound_atr": rebound_atr,
         "first_pullback_close_location": close_location,
         "first_pullback_amount_ratio": amount_ratio,
+        "first_pullback_correction_turnover_days": correction_turnover_days,
     })
     return result
 
@@ -3529,6 +3554,9 @@ def _print_daily_summary(trade_date, market, sectors, candidates):
             int(feature.get("first_pullback_prior_touches", 0)),
             round(float(feature.get("first_pullback_rebound_atr", 0.0)), 2),
             round(float(feature.get("first_pullback_amount_ratio", 0.0)), 2),
+            round(float(feature.get(
+                "first_pullback_correction_turnover_days", 0.0
+            )), 2),
             feature.get("entry_setup"), item.get("entry_status"),
         ))
     if pullback_scan:

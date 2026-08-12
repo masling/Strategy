@@ -594,7 +594,7 @@ class StockSelectionTests(unittest.TestCase):
             "ma7": 105.0, "ma7_prev1": 105.6, "ma7_prev2": 106.4,
             "ma13": 100.0, "ma13_prev1": 99.5, "ma13_prev": 98.7,
             "ma40": 92.0, "ma40_prev": 91.2,
-            "ma7_slope3": -0.010, "ma13_slope3": 0.008,
+            "ma7_slope3": -0.004, "ma13_slope3": 0.008,
             "ma40_slope5": 0.005,
             "distance_ma40": 101.0 / 92.0 - 1.0,
             "ma7_ma13_gap": 105.0 / 100.0 - 1.0,
@@ -617,7 +617,7 @@ class StockSelectionTests(unittest.TestCase):
             "ma7": 105.0, "ma7_prev1": 105.6, "ma7_prev2": 106.4,
             "ma13": 100.0, "ma13_prev1": 99.5, "ma13_prev": 98.7,
             "ma40": 92.0, "ma40_prev": 91.2,
-            "ma7_slope3": -0.010, "ma13_slope3": 0.008,
+            "ma7_slope3": -0.004, "ma13_slope3": 0.008,
             "ma40_slope5": 0.005,
             "distance_ma40": 101.0 / 92.0 - 1.0,
             "ma7_ma13_gap": 105.0 / 100.0 - 1.0,
@@ -632,6 +632,31 @@ class StockSelectionTests(unittest.TestCase):
             "first_pullback_amount_ratio": 1.10,
         })
         self.assertIsNone(setup)
+
+    def test_first_deep_ma13_pullback_requires_time_or_turnover_digestion(self):
+        metrics = {
+            "close": 101.0, "low": 99.8, "previous_high": 106.0,
+            "ma7": 105.0, "ma7_prev1": 105.6, "ma7_prev2": 106.4,
+            "ma13": 100.0, "ma13_prev1": 99.5, "ma13_prev": 98.7,
+            "ma40": 92.0, "ma40_prev": 91.2,
+            "ma7_slope3": -0.004, "ma13_slope3": 0.008,
+            "distance_ma40": 101.0 / 92.0 - 1.0,
+            "ma7_ma13_gap": 105.0 / 100.0 - 1.0,
+            "ma13_ma40_gap": 100.0 / 92.0 - 1.0,
+            "first_pullback_score": 76.0,
+            "first_pullback_peak_extension": 0.10,
+            "first_pullback_days_from_peak": 2,
+            "first_pullback_depth": 0.08,
+            "first_pullback_prior_touches": 0,
+            "first_pullback_rebound_atr": 0.9,
+            "first_pullback_close_location": 0.70,
+            "first_pullback_amount_ratio": 1.10,
+        }
+        self.assertIsNone(invoke("entry_setup_kind", metrics))
+        metrics["first_pullback_correction_turnover_days"] = 2.2
+        self.assertEqual(
+            invoke("entry_setup_kind", metrics), "first_ma13_pullback"
+        )
 
     def test_bottom_cross_starter_is_only_below_ma13_entry_exception(self):
         setup = invoke("entry_setup_kind", {
