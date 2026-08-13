@@ -3,9 +3,12 @@ import { fetchDaily, fetchThirtyMinute } from './market-data.mjs';
 import { candleAtClientPoint, drawCandles, drawScoreSeries } from './chart.mjs';
 import { sampleLog } from './sample-log.js';
 import {
-  actionLabels, importSamples, normalizeSample, readSamples, reasonLabels,
-  sampleExport, samplesToCsv, scopeLabels, setupLabels, verdictLabels, writeSamples,
-} from './sample-store.mjs?v=20260813-v220';
+  actionLabels, deriveTechnicalFeatures, importSamples, intradayConfirmLabels,
+  invalidationRuleLabels, lifecycleLabels, maStructureLabels, marketStateLabels,
+  normalizeSample, overheadSupplyLabels, pullbackPathLabels, readSamples,
+  sampleExport, samplesToCsv, scopeLabels, sectorStageLabels, setupLabels, spaceStateLabels,
+  structuredSampleErrors, timingStateLabels, verdictLabels, volumePatternLabels, writeSamples,
+} from './sample-store.mjs?v=20260813-v230';
 
 const $ = selector => document.querySelector(selector);
 const state = {
@@ -44,12 +47,12 @@ function selectedIndex() {
 
 function sampleSource() {
   return {
-    webVersion: '2.2.0', strategy: state.report?.meta?.strategy || state.report?.meta?.engine || '',
+    webVersion: '2.3.0', strategy: state.report?.meta?.strategy || state.report?.meta?.engine || '',
     backtestStart: state.report?.meta?.startTime || '', backtestEnd: state.report?.meta?.endTime || '',
   };
 }
 
-function contextSnapshot({ stock = null, bar = null, timeframe = '1d' } = {}) {
+function contextSnapshot({ stock = null, bar = null, timeframe = '1d', technical = null } = {}) {
   const point = rowDateTime(bar || {});
   const decisionDate = point.date || String(state.day?.date || '').replace(/\D/g, '').slice(0, 8);
   const snapshotDay = state.report?.days?.find(day => String(day.date).replace(/\D/g, '').slice(0, 8) === decisionDate) || state.day;
@@ -72,16 +75,39 @@ function contextSnapshot({ stock = null, bar = null, timeframe = '1d' } = {}) {
       score: candidate?.score, strength: candidate?.strength, strengthFit: candidate?.strengthFit,
       entry: candidate?.entry, status: candidate?.status, setup: candidate?.setup,
     },
-    bar: bar || {},
+    bar: bar || {}, technical: technical || {},
   };
+}
+
+async function dailyTechnicalForPoint(code, bar, preferredRows = null) {
+  const date = rowDateTime(bar).date;
+  if (!code || !date) return {};
+  let rows = preferredRows;
+  if (!rows?.length) {
+    const key = `technical:daily:${code}:${date}`;
+    rows = state.cache.get(key);
+    if (!rows) { rows = await fetchDaily(code, date, date); state.cache.set(key, rows); }
+  }
+  const dailyBar = rows.find(row => String(row.time || '').replace(/\D/g, '').slice(0, 8) === date);
+  return deriveTechnicalFeatures(rows, dailyBar || bar);
 }
 
 function defaultLabel(scope) {
   return {
     scope, verdict: 'uncertain', action: scope === 'market' || scope === 'sector' ? 'observe' : 'no_trade',
     setup: scope === 'market' ? 'market_regime' : scope === 'sector' ? 'sector_rotation' : 'first_ma13_pullback',
-    confidence: 'medium', positionScale: null, reasons: [], summary: '', invalidation: '', notes: '',
+    confidence: 'medium', positionScale: null, reasons: [], marketState: 'unknown',
+    sectorStage: 'unknown', lifecycle: 'unknown', maStructures: [], pullbackPath: 'unknown',
+    spaceState: 'unknown', timingState: 'unknown', volumePatterns: [], overheadSupply: 'unknown',
+    intradayConfirm: 'not_checked', invalidationRules: [], summary: '', invalidation: '', notes: '',
   };
+}
+
+function inferredMarketState(context = {}) {
+  if (context.regime === 'STRONG' || Number(context.exposure) >= .7) return 'strong';
+  if (context.regime === 'WARNING' || context.regime === 'EXIT' || context.regime === 'OFF' && Number(context.exposure) === 0) return 'risk_window';
+  if (Number(context.exposure) >= .3) return 'rotation';
+  return Number(context.exposure) > 0 ? 'weak' : 'unknown';
 }
 
 function beginSample(scope, context, overrides = {}) {
@@ -102,11 +128,60 @@ function contextToken(label, value) {
   return value == null || value === '' ? '' : `<span class="context-token">${html(label)} ${html(value)}</span>`;
 }
 
+function checkedValues(selector) {
+  return [...document.querySelectorAll(`${selector} input:checked`)].map(input => input.value);
+}
+
+function setCheckedValues(selector, values = []) {
+  document.querySelectorAll(`${selector} input`).forEach(input => { input.checked = values.includes(input.value); });
+}
+
+function technicalMetric(label, value, suffix = '', digits = 2) {
+  const output = value == null || !Number.isFinite(Number(value)) ? '—' : `${Number(value).toFixed(digits)}${suffix}`;
+  return `<div class="technical-metric"><small>${html(label)}</small><strong>${html(output)}</strong></div>`;
+}
+
+function renderTechnical(technical = {}) {
+  const values = Object.values(technical).filter(value => value != null && value !== 'daily');
+  if (!values.length) { $('#sampleTechnical').className = 'technical-grid empty'; $('#sampleTechnical').textContent = '选择个股K线后自动计算'; return; }
+  $('#sampleTechnical').className = 'technical-grid';
+  $('#sampleTechnical').innerHTML = [
+    technicalMetric('MA7', technical.ma7), technicalMetric('MA13', technical.ma13), technicalMetric('MA40', technical.ma40),
+    technicalMetric('MA7/13间距', technical.gap713Pct, '%'), technicalMetric('MA13/40间距', technical.gap1340Pct, '%'),
+    technicalMetric('两组间距比', technical.gapBalanceRatio), technicalMetric('MA7三日斜率', technical.ma7Slope3Pct, '%'),
+    technicalMetric('MA13三日斜率', technical.ma13Slope3Pct, '%'), technicalMetric('MA40三日斜率', technical.ma40Slope3Pct, '%'),
+    technicalMetric('收盘偏离MA13', technical.closeMa13BiasPct, '%'), technicalMetric('距20日高点', technical.drawdown20dPct, '%'),
+    technicalMetric('高点后天数', technical.daysFrom20dHigh, '', 0), technicalMetric('当日/20日量比', technical.volume1To20Ratio),
+    technicalMetric('近5日/20日量比', technical.volume5To20Ratio), technicalMetric('近5日贴MA7天数', technical.nearMa7Days5, '', 0),
+    `<div class="technical-metric"><small>日线MA13状态</small><strong>${technical.reclaimedMa13 === true ? '盘中跌破后收复' : technical.aboveMa13 === true ? '收盘站上' : technical.aboveMa13 === false ? '收盘未站上' : '数据不足'}</strong></div>`,
+  ].join('');
+}
+
+function updateSampleFormState() {
+  if (!state.sampleDraft) return;
+  const label = formLabel(), atLeastSector = ['sector', 'stock_selection', 'trade_point'].includes(label.scope);
+  const atLeastStock = ['stock_selection', 'trade_point'].includes(label.scope);
+  $('#sampleSectorStage').disabled = !atLeastSector;
+  document.querySelector('[data-step="structure"]').dataset.inactive = String(!atLeastStock);
+  document.querySelectorAll('[data-step="structure"] select,[data-step="structure"] input').forEach(control => { control.disabled = !atLeastStock; });
+  document.querySelector('[data-step="execution"]').dataset.inactive = String(!atLeastStock);
+  document.querySelectorAll('#sampleInvalidationRules input').forEach(control => { control.disabled = !atLeastStock; });
+  $('#sampleIntradayConfirm').disabled = label.scope !== 'trade_point';
+  const errors = structuredSampleErrors({ label }), total = label.scope === 'market' ? 1 : label.scope === 'sector' ? 2
+    : label.scope === 'stock_selection' ? 9 + (['open', 'add', 'addback', 'hold', 'trim', 'reduce_core', 'exit'].includes(label.action) ? 1 : 0)
+      : 10 + (['open', 'add', 'addback', 'hold', 'trim', 'reduce_core', 'exit'].includes(label.action) ? 1 : 0);
+  const percentComplete = Math.max(0, Math.round((total - errors.length) / total * 100));
+  $('#sampleCompletion i').style.width = `${percentComplete}%`;
+  $('#sampleCompletion strong').textContent = `${percentComplete}%`;
+  $('#sampleCompletion').title = errors.length ? errors.join('；') : '结构化字段已完整';
+}
+
 function renderSampleForm() {
   const draft = state.sampleDraft;
   if (!draft) {
     $('#sampleContext').className = 'sample-context empty';
     $('#sampleContext').textContent = '从日期复盘、候选股或个股K线发起采集。';
+    renderTechnical(); $('#sampleCompletion i').style.width = '0'; $('#sampleCompletion strong').textContent = '0%';
     return;
   }
   const context = draft.context || {}, label = draft.label || {};
@@ -125,21 +200,51 @@ function renderSampleForm() {
   $('#sampleSetup').value = setupLabels[label.setup] ? label.setup : 'custom';
   $('#sampleConfidence').value = label.confidence || 'medium';
   $('#samplePositionScale').value = label.positionScale == null ? '' : String(label.positionScale);
+  $('#sampleMarketState').value = marketStateLabels[label.marketState] ? label.marketState : 'unknown';
+  $('#sampleSectorStage').value = sectorStageLabels[label.sectorStage] ? label.sectorStage : 'unknown';
+  $('#sampleLifecycle').value = lifecycleLabels[label.lifecycle] ? label.lifecycle : 'unknown';
+  $('#samplePullbackPath').value = pullbackPathLabels[label.pullbackPath] ? label.pullbackPath : 'unknown';
+  $('#sampleSpaceState').value = spaceStateLabels[label.spaceState] ? label.spaceState : 'unknown';
+  $('#sampleTimingState').value = timingStateLabels[label.timingState] ? label.timingState : 'unknown';
+  $('#sampleOverheadSupply').value = overheadSupplyLabels[label.overheadSupply] ? label.overheadSupply : 'unknown';
+  $('#sampleIntradayConfirm').value = intradayConfirmLabels[label.intradayConfirm] ? label.intradayConfirm : 'not_checked';
+  setCheckedValues('#sampleMaStructures', label.maStructures);
+  setCheckedValues('#sampleVolumePatterns', label.volumePatterns);
+  setCheckedValues('#sampleInvalidationRules', label.invalidationRules);
   $('#sampleSummary').value = label.summary || '';
   $('#sampleInvalidation').value = label.invalidation || '';
   $('#sampleNotes').value = label.notes || '';
-  document.querySelectorAll('#sampleReasons input').forEach(input => { input.checked = (label.reasons || []).includes(input.value); });
+  renderTechnical(context.technical);
   $('#sampleFormMessage').textContent = state.sampleEditingId ? '正在编辑已有样本' : '';
   $('#sampleFormMessage').className = '';
+  updateSampleFormState();
 }
 
 function formLabel() {
+  const scope = $('#sampleScope').value, atLeastSector = ['sector', 'stock_selection', 'trade_point'].includes(scope);
+  const atLeastStock = ['stock_selection', 'trade_point'].includes(scope);
+  const marketState = $('#sampleMarketState').value, sectorStage = atLeastSector ? $('#sampleSectorStage').value : 'unknown';
+  const lifecycle = atLeastStock ? $('#sampleLifecycle').value : 'unknown';
+  const maStructures = atLeastStock ? checkedValues('#sampleMaStructures') : [];
+  const pullbackPath = atLeastStock ? $('#samplePullbackPath').value : 'unknown';
+  const spaceState = atLeastStock ? $('#sampleSpaceState').value : 'unknown';
+  const timingState = atLeastStock ? $('#sampleTimingState').value : 'unknown';
+  const volumePatterns = atLeastStock ? checkedValues('#sampleVolumePatterns') : [];
+  const overheadSupply = atLeastStock ? $('#sampleOverheadSupply').value : 'unknown';
+  const intradayConfirm = scope === 'trade_point' ? $('#sampleIntradayConfirm').value : 'not_checked';
+  const reasons = [marketState !== 'unknown' ? 'market' : '', sectorStage !== 'unknown' ? 'sector' : '',
+    lifecycle !== 'unknown' ? 'lifecycle' : '', maStructures.length ? 'ma_structure' : '',
+    pullbackPath !== 'unknown' || spaceState !== 'unknown' ? 'space' : '', timingState !== 'unknown' ? 'time' : '',
+    volumePatterns.length ? 'volume' : '', overheadSupply !== 'unknown' ? 'overhead_supply' : '',
+    intradayConfirm !== 'not_checked' ? 'intraday' : ''].filter(Boolean);
   return {
-    scope: $('#sampleScope').value, verdict: $('#sampleVerdict').value,
+    scope, verdict: $('#sampleVerdict').value,
     action: $('#sampleAction').value, setup: $('#sampleSetup').value,
     confidence: $('#sampleConfidence').value,
     positionScale: $('#samplePositionScale').value === '' ? null : Number($('#samplePositionScale').value),
-    reasons: [...document.querySelectorAll('#sampleReasons input:checked')].map(input => input.value),
+    reasons, marketState, sectorStage, lifecycle, maStructures, pullbackPath, spaceState,
+    timingState, volumePatterns, overheadSupply, intradayConfirm,
+    invalidationRules: atLeastStock ? checkedValues('#sampleInvalidationRules') : [],
     summary: $('#sampleSummary').value, invalidation: $('#sampleInvalidation').value,
     notes: $('#sampleNotes').value,
   };
@@ -150,11 +255,19 @@ function renderSampleLibrary() {
   $('#sampleRows').innerHTML = ordered.length ? ordered.map(sample => {
     const context = sample.context || {}, label = sample.label || {};
     const subject = context.stockCode ? `${context.stockCode} ${context.stockName || ''}` : context.sectorCode?.replace(/^SW1_?/, '') || context.indexName || '市场整体';
-    return `<tr><td>${displayDate(context.decisionDate)}<br><small>${context.decisionTime ? displayTime(context.decisionTime) : context.timeframe === '30m' ? '30分钟' : '日K'}</small></td><td>${html(subject)}<br><small>${html(context.indexName || context.indexCode || '')}${context.sectorCode ? ` · ${html(context.sectorCode.replace(/^SW1_?/, ''))}` : ''}</small></td><td>${html(scopeLabels[label.scope] || label.scope)}</td><td><span class="sample-verdict ${html(label.verdict)}">${html(verdictLabels[label.verdict] || label.verdict)}</span><br><small>${html(label.confidence || '')}</small></td><td>${html(actionLabels[label.action] || label.action)}<br><small>${html(setupLabels[label.setup] || label.setup || '—')}</small></td><td>${html(label.summary || '—')}<br><small>${html((label.reasons || []).map(reason => reasonLabels[reason] || reason).join(' · '))}</small></td><td><div class="sample-row-actions"><button type="button" data-sample-edit="${html(sample.id)}">编辑</button><button type="button" data-sample-delete="${html(sample.id)}">删除</button></div></td></tr>`;
+    const structure = [marketStateLabels[label.marketState], sectorStageLabels[label.sectorStage], lifecycleLabels[label.lifecycle],
+      pullbackPathLabels[label.pullbackPath], spaceStateLabels[label.spaceState], timingStateLabels[label.timingState],
+      overheadSupplyLabels[label.overheadSupply], intradayConfirmLabels[label.intradayConfirm]]
+      .filter(value => value && !value.includes('待判断') && value !== '未核对30分钟');
+    const missing = structuredSampleErrors(sample), quality = missing.length
+      ? `<span class="sample-quality pending" title="${html(missing.join('；'))}">待补全 ${missing.length}</span>`
+      : '<span class="sample-quality ready">可分析</span>';
+    return `<tr><td>${displayDate(context.decisionDate)}<br><small>${context.decisionTime ? displayTime(context.decisionTime) : context.timeframe === '30m' ? '30分钟' : '日K'}</small></td><td>${html(subject)}<br><small>${html(context.indexName || context.indexCode || '')}${context.sectorCode ? ` · ${html(context.sectorCode.replace(/^SW1_?/, ''))}` : ''}</small></td><td>${html(scopeLabels[label.scope] || label.scope)}<br>${quality}</td><td><span class="sample-verdict ${html(label.verdict)}">${html(verdictLabels[label.verdict] || label.verdict)}</span><br><small>${html(label.confidence || '')}</small></td><td>${html(actionLabels[label.action] || label.action)}<br><small>${html(setupLabels[label.setup] || label.setup || '—')}</small></td><td>${html(label.summary || '—')}<div class="sample-library-structure">${structure.map(value => `<span class="tag">${html(value)}</span>`).join('')}</div></td><td><div class="sample-row-actions"><button type="button" data-sample-edit="${html(sample.id)}">编辑</button><button type="button" data-sample-delete="${html(sample.id)}">删除</button></div></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">尚未采集样本。请从日期复盘、候选股或个股K线开始。</td></tr>';
   const positives = state.samples.filter(sample => sample.label?.verdict === 'positive').length;
   const negatives = state.samples.filter(sample => sample.label?.verdict === 'negative').length;
-  $('#sampleLibrarySummary').innerHTML = state.samples.length ? `<strong>共 ${state.samples.length} 条</strong><br>正样本 ${positives} · 反样本 ${negatives} · 待研究 ${state.samples.length - positives - negatives}` : '尚未采集样本';
+  const analysisReady = state.samples.filter(sample => structuredSampleErrors(sample).length === 0).length;
+  $('#sampleLibrarySummary').innerHTML = state.samples.length ? `<strong>共 ${state.samples.length} 条 · 可分析 ${analysisReady}</strong><br>正样本 ${positives} · 反样本 ${negatives} · 待研究 ${state.samples.length - positives - negatives} · 待补全 ${state.samples.length - analysisReady}` : '尚未采集样本';
   document.querySelectorAll('[data-sample-edit]').forEach(button => button.addEventListener('click', () => {
     const sample = state.samples.find(item => item.id === button.dataset.sampleEdit);
     if (!sample) return;
@@ -354,7 +467,7 @@ function renderCandidates() {
     renderCandidates();
   }));
   $('#openStockDetail').disabled = !state.candidateStock;
-  $('#sampleCandidate').disabled = !state.candidateStock;
+  $('#sampleCandidate').disabled = true;
   renderCandidateChart();
 }
 
@@ -366,6 +479,7 @@ async function renderCandidateChart() {
     $('#candidateChartNote').textContent = '当日没有可显示的候选股。';
     $('#candidateChartLoading').classList.add('hidden');
     drawCandles($('#candidateChart'), [], []);
+    $('#sampleCandidate').disabled = true;
     return;
   }
   const code = candidate.code, request = ++state.candidateRequest;
@@ -383,6 +497,7 @@ async function renderCandidateChart() {
     state.candidateChartRows = rows.slice(-90);
     const trades = stockTrading(code)?.trades || [];
     drawCandles($('#candidateChart'), state.candidateChartRows, trades, rows, sampleMarkers(code));
+    $('#sampleCandidate').disabled = !rows.some(row => String(row.time || '').replace(/\D/g, '').slice(0, 8) === end);
     $('#candidateChartNote').textContent = rows.length
       ? `日K · ${rows[0].time} — ${rows.at(-1).time} · MA7 / MA13 / MA40 · 入场评分 ${scoreText(candidate.entry)}，截止当前复盘日。`
       : '腾讯财经未返回该股在当前复盘日之前的日K。';
@@ -390,6 +505,7 @@ async function renderCandidateChart() {
   } catch (error) {
     if (request !== state.candidateRequest) return;
     state.candidateChartRows = []; state.candidateChartSourceRows = [];
+    $('#sampleCandidate').disabled = true;
     drawCandles($('#candidateChart'), [], []);
     $('#candidateChartNote').textContent = `${error.message}，候选股评分仍可正常查看。`;
     $('#candidateChartLoading').classList.add('hidden');
@@ -505,7 +621,7 @@ function stepDay(offset) {
 function diagnostic() {
   const meta = state.report.meta;
   const legacyLinks = state.report.days.some(day => day.watchlist.some(item => !item.sector));
-  $('#diagnosticText').textContent = [`Web版本：V2.2.0 (2026-08-13)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, `本地研究样本：${state.samples.length} 条`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
+  $('#diagnosticText').textContent = [`Web版本：V2.3.0 (2026-08-13)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, `本地研究样本：${state.samples.length} 条`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
 }
 
 function parse() {
@@ -555,17 +671,20 @@ $('#openStockDetail').addEventListener('click', () => {
 });
 $('#sampleReview').addEventListener('click', () => {
   const scope = state.sectorCode ? 'sector' : 'market';
-  beginSample(scope, contextSnapshot(), {
+  const context = contextSnapshot();
+  beginSample(scope, context, {
     action: 'observe', setup: scope === 'market' ? 'market_regime' : 'sector_rotation',
-    reasons: scope === 'market' ? ['market'] : ['market', 'sector'],
+    marketState: inferredMarketState(context), reasons: scope === 'market' ? ['market'] : ['market', 'sector'],
   });
 });
-$('#sampleCandidate').addEventListener('click', () => {
+$('#sampleCandidate').addEventListener('click', async () => {
   if (!state.candidateStock) return;
   const date = String(state.day?.date || '').replace(/\D/g, '').slice(0, 8);
   const bar = state.candidateChartSourceRows.find(row => String(row.time || '').replace(/\D/g, '').slice(0, 8) === date) || null;
-  beginSample('stock_selection', contextSnapshot({ stock: state.candidateStock, bar, timeframe: '1d' }), {
-    action: 'no_trade', reasons: ['market', 'sector', 'lifecycle', 'ma_structure'],
+  const technical = await dailyTechnicalForPoint(state.candidateStock.code, bar, state.candidateChartSourceRows);
+  const context = contextSnapshot({ stock: state.candidateStock, bar, timeframe: '1d', technical });
+  beginSample('stock_selection', context, {
+    action: 'no_trade', marketState: inferredMarketState(context), reasons: ['market', 'sector', 'lifecycle', 'ma_structure'],
   });
 });
 document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
@@ -610,6 +729,8 @@ $('#sampleForm').addEventListener('submit', event => {
       ...(existing || {}), ...(state.sampleDraft || {}), id: state.sampleEditingId || state.sampleDraft?.id,
       label: formLabel(), source: sampleSource(),
     });
+    const structureErrors = structuredSampleErrors(sample);
+    if (structureErrors.length) throw new Error(`请补齐：${structureErrors.join('、')}`);
     state.samples = existing ? state.samples.map(item => item.id === existing.id ? sample : item) : [...state.samples, sample];
     writeSamples(state.samples); state.sampleEditingId = sample.id; state.sampleDraft = JSON.parse(JSON.stringify(sample));
     message.textContent = '样本已保存到本机浏览器'; message.className = 'success';
@@ -677,25 +798,37 @@ chartCanvas.addEventListener('pointerdown', event => {
   const end = () => { chartCanvas.removeEventListener('pointermove', move); chartCanvas.removeEventListener('pointerup', end); chartCanvas.removeEventListener('pointercancel', end); };
   chartCanvas.addEventListener('pointermove', move); chartCanvas.addEventListener('pointerup', end); chartCanvas.addEventListener('pointercancel', end);
 });
-chartCanvas.addEventListener('click', event => {
+chartCanvas.addEventListener('click', async event => {
   if (!state.sampleCapture || !state.stock) return;
   const rows = chartViewport(), hit = candleAtClientPoint(chartCanvas, rows, event.clientX, event.clientY);
   if (!hit) return;
+  const dailyRows = state.chartType === 'daily' ? state.chartRows : null;
+  let technical = {}, technicalWarning = '';
+  try { technical = await dailyTechnicalForPoint(state.stock.code, hit.row, dailyRows); }
+  catch (error) { technicalWarning = `日线指标暂未获取：${error.message}`; }
+  const pointContext = contextSnapshot({ stock: state.stock, bar: hit.row, timeframe: state.chartType, technical });
   const existingLabel = state.sampleDraft?.label || defaultLabel('trade_point');
   state.sampleDraft = {
     ...(state.sampleDraft || {}), source: sampleSource(),
-    context: contextSnapshot({ stock: state.stock, bar: hit.row, timeframe: state.chartType }),
-    label: { ...existingLabel, scope: existingLabel.scope || 'trade_point' },
+    context: pointContext,
+    label: { ...existingLabel, scope: existingLabel.scope || 'trade_point',
+      marketState: existingLabel.marketState === 'unknown' ? inferredMarketState(pointContext) : existingLabel.marketState },
   };
   setSampleCapture(false); setWorkspace(state.sampleReturnWorkspace || 'sample'); renderSampleForm();
-  $('#sampleFormMessage').textContent = `已选择 ${hit.row.time} 的K线`;
-  $('#sampleFormMessage').className = 'success';
+  $('#sampleFormMessage').textContent = `已选择 ${hit.row.time} 的K线${technicalWarning ? `；${technicalWarning}` : ''}`;
+  $('#sampleFormMessage').className = technicalWarning ? '' : 'success';
 });
 chartCanvas.addEventListener('keydown', event => {
   if (!['+', '=', '-', '_', 'ArrowLeft', 'ArrowRight', 'Home', 'End', '0'].includes(event.key)) return; event.preventDefault();
   if (event.key === '+' || event.key === '=') zoomChart(.8); else if (event.key === '-' || event.key === '_') zoomChart(1.25); else if (event.key === 'ArrowLeft') panChart(Math.max(1, Math.round(state.chartView.bars[state.chartType] / 6))); else if (event.key === 'ArrowRight') panChart(-Math.max(1, Math.round(state.chartView.bars[state.chartType] / 6))); else if (event.key === 'Home') panChart(Number.MAX_SAFE_INTEGER); else if (event.key === 'End') panChart(-Number.MAX_SAFE_INTEGER); else resetChartView();
 });
 
-$('#sampleReasons').innerHTML = Object.entries(reasonLabels).map(([value, label]) => `<label class="reason-option"><input type="checkbox" value="${html(value)}">${html(label)}</label>`).join('');
+function renderOptionChecks(selector, labels) {
+  $(selector).innerHTML = Object.entries(labels).map(([value, label]) => `<label class="reason-option"><input type="checkbox" value="${html(value)}">${html(label)}</label>`).join('');
+}
+renderOptionChecks('#sampleMaStructures', maStructureLabels);
+renderOptionChecks('#sampleVolumePatterns', volumePatternLabels);
+renderOptionChecks('#sampleInvalidationRules', invalidationRuleLabels);
+$('#sampleForm').addEventListener('change', updateSampleFormState);
 renderSampleLibrary();
 $('#logInput').value = sampleLog; parse();

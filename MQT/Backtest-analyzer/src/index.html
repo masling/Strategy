@@ -4,12 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>QMT 回测分析器</title>
-  <link rel="stylesheet" href="./styles.css?v=20260813-v220">
+  <link rel="stylesheet" href="./styles.css?v=20260813-v230">
 </head>
 <body>
   <header>
     <div>
-      <span class="eyebrow">QMT STRATEGY LAB · V2.2.0</span>
+      <span class="eyebrow">QMT STRATEGY LAB · V2.3.0</span>
       <h1>回测复盘工作台</h1>
       <p>先核对当日指数、板块和入场候选，再下钻到单股买卖细节。</p>
     </div>
@@ -119,6 +119,7 @@
         <div class="sample-layout">
           <form id="sampleForm" class="sample-form">
             <div id="sampleContext" class="sample-context empty">从日期复盘、候选股或个股K线发起采集。</div>
+            <div id="sampleCompletion" class="sample-completion" aria-live="polite"><span>结构化完整度</span><div><i></i></div><strong>0%</strong></div>
             <div class="sample-field-grid">
               <label>判断层级<select id="sampleScope" required><option value="market">市场判断</option><option value="sector">板块判断</option><option value="stock_selection">个股选择</option><option value="trade_point">买卖点</option></select></label>
               <label>样本结论<select id="sampleVerdict" required><option value="positive">正样本</option><option value="negative">反样本</option><option value="uncertain">待研究</option></select></label>
@@ -127,16 +128,44 @@
               <label>置信度<select id="sampleConfidence"><option value="high">高</option><option value="medium" selected>中</option><option value="low">低</option></select></label>
               <label>预期仓位<select id="samplePositionScale"><option value="">不指定</option><option value="0">0%</option><option value="0.1">10%</option><option value="0.2">20%</option><option value="0.3">30%</option><option value="0.4">40%</option><option value="0.5">50%</option><option value="0.6">60%</option></select></label>
             </div>
-            <fieldset><legend>判断维度（可多选）</legend><div id="sampleReasons" class="reason-options"></div></fieldset>
-            <label>判断原因<textarea id="sampleSummary" class="sample-textarea" required placeholder="只写决策时点已经可见的信息，例如：高点后首次直接深回MA13，中间未在MA7形成成交密集平台……"></textarea></label>
-            <label>失效条件<textarea id="sampleInvalidation" class="sample-textarea compact" placeholder="例如：尾盘重新跌破MA13，或次日一小时内无法站回则减仓"></textarea></label>
+
+            <fieldset class="sample-step" data-step="environment"><legend><b>1</b> 市场与板块背景</legend>
+              <div class="sample-field-grid two-column">
+                <label>市场环境<select id="sampleMarketState"><option value="unknown">待判断</option><option value="strong">强势</option><option value="rotation">结构轮动</option><option value="weak">弱势但有活跃板块</option><option value="risk_window">风险窗口</option></select></label>
+                <label>板块阶段<select id="sampleSectorStage"><option value="unknown">待判断</option><option value="startup">启动</option><option value="advance">主升</option><option value="first_pullback">首次回调</option><option value="range">震荡</option><option value="decline">衰退</option></select></label>
+              </div>
+            </fieldset>
+
+            <fieldset class="sample-step" data-step="structure"><legend><b>2</b> 个股阶段与回调结构</legend>
+              <div class="sample-field-grid">
+                <label>个股生命周期<select id="sampleLifecycle"><option value="unknown">待判断</option><option value="bottom_start">底部启动</option><option value="first_ma7_pullback">首次MA7回调</option><option value="first_ma13_pullback">首次MA13深回</option><option value="second_pullback">二次回调</option><option value="high_range">高位震荡</option><option value="breakdown">破位阶段</option></select></label>
+                <label>回调路径<select id="samplePullbackPath"><option value="unknown">待判断</option><option value="direct_ma13">高点直接回MA13</option><option value="via_ma7_rebound">MA7反弹后再回落</option><option value="platform_break">平台破位后回落</option><option value="slow_decline">缓慢阴跌</option><option value="no_pullback">非回调形态</option></select></label>
+                <label>空间条件<select id="sampleSpaceState"><option value="unknown">待判断</option><option value="sufficient">空间充分</option><option value="neutral">空间一般</option><option value="insufficient">空间不足</option><option value="overheated">位置过热</option></select></label>
+                <label>时间条件<select id="sampleTimingState"><option value="unknown">待判断</option><option value="sufficient">调整充分</option><option value="short">调整偏短</option><option value="too_long">拖延过久</option><option value="not_applicable">不适用</option></select></label>
+                <label>筹码压力<select id="sampleOverheadSupply"><option value="unknown">待判断</option><option value="none">无明显压力</option><option value="light">轻度成交平台</option><option value="dense">密集套牢区</option></select></label>
+              </div>
+              <div class="sample-option-group"><span>均线结构（至少一项）</span><div id="sampleMaStructures" class="reason-options"></div></div>
+              <div class="sample-option-group"><span>量能结构（至少一项）</span><div id="sampleVolumePatterns" class="reason-options"></div></div>
+            </fieldset>
+
+            <fieldset class="sample-step" data-step="execution"><legend><b>3</b> 盘中确认与执行边界</legend>
+              <div class="sample-field-grid two-column">
+                <label>盘中确认<select id="sampleIntradayConfirm"><option value="not_checked">未核对30分钟</option><option value="two_bar_reclaim">连续两根30分钟站回</option><option value="single_reclaim">单根站回</option><option value="unconfirmed">尚未收复</option><option value="close_failed">盘中收复但尾盘失守</option><option value="not_applicable">不适用</option></select></label>
+              </div>
+              <div class="sample-option-group"><span>失效或退出条件</span><div id="sampleInvalidationRules" class="reason-options"></div></div>
+            </fieldset>
+
+            <section class="sample-technical" aria-labelledby="sampleTechnicalTitle"><div><h3 id="sampleTechnicalTitle">自动提取的日线客观指标</h3><p>无论标点在日K还是30分钟K，这里统一使用该交易日的日线MA7/13/40。</p></div><div id="sampleTechnical" class="technical-grid empty">选择个股K线后自动计算</div></section>
+
+            <label>关键判断依据<textarea id="sampleSummary" class="sample-textarea" required placeholder="只补充结构化字段未能表达的关键证据，例如：此前远离MA7后第一次直接深回MA13，中途没有形成套牢平台。"></textarea></label>
+            <label>失效条件补充<textarea id="sampleInvalidation" class="sample-textarea compact" placeholder="只补充上方固定选项无法表达的条件"></textarea></label>
             <label>研究备注<textarea id="sampleNotes" class="sample-textarea compact" placeholder="待核对问题、相似案例、后续研究方向"></textarea></label>
             <div class="sample-form-actions"><button id="samplePickPoint" type="button">去个股K线重新标点</button><span id="sampleFormMessage" role="status"></span><button id="sampleReset" type="button">重置</button><button class="primary" type="submit">保存样本</button></div>
           </form>
           <aside class="sample-principles">
             <h3>采集检查</h3>
-            <ol><li>先写市场和板块背景</li><li>再判断个股生命周期</li><li>同时考虑空间、时间、量能和筹码</li><li>30分钟只定位执行时点</li><li>明确动作级别和失效条件</li></ol>
-            <p>点击个股日K或30分钟K可选择最近一根K线，标点会保存开高低收、成交量及当时的指数、板块和候选评分。</p>
+            <ol><li>市场和板块决定是否值得参与</li><li>生命周期和回调路径定义形态</li><li>空间、时间、量能和筹码共同决定质量</li><li>30分钟只用于确认日线位置的执行时点</li><li>固定失效条件让同类样本可统计</li></ol>
+            <p>带“待判断”的字段会阻止保存。不同判断层级只校验当前需要的部分；旧版样本会自动迁移，但再次编辑时需要补齐新字段。</p>
           </aside>
         </div>
       </article>
@@ -149,6 +178,6 @@
 
     <section class="diagnostics"><details><summary>解析信息与警告</summary><pre id="diagnosticText"></pre></details></section>
   </main>
-  <script type="module" src="./app.mjs?v=20260813-v220"></script>
+  <script type="module" src="./app.mjs?v=20260813-v230"></script>
 </body>
 </html>
