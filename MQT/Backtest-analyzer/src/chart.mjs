@@ -45,7 +45,7 @@ function clockLabel(order) {
   return clock.length === 6 ? `${clock.slice(0, 2)}:${clock.slice(2, 4)}` : '';
 }
 
-export function drawCandles(canvas, rows, orders = [], sourceRows = rows) {
+export function drawCandles(canvas, rows, orders = [], sourceRows = rows, annotations = []) {
   const { ctx, width, height } = setup(canvas); ctx.clearRect(0, 0, width, height);
   if (!rows.length) return empty(ctx, width, height, '暂无K线数据');
   const pad = { l: 46, r: 16, t: 20, b: 34 }, chartH = height - pad.t - pad.b;
@@ -70,6 +70,14 @@ export function drawCandles(canvas, rows, orders = [], sourceRows = rows) {
     trades.push(order);
     tradesByIndex.set(index, trades);
   });
+  const annotationsByIndex = new Map();
+  annotations.forEach(annotation => {
+    const index = rowForTrade(rows, annotation);
+    if (index == null) return;
+    const items = annotationsByIndex.get(index) || [];
+    items.push(annotation);
+    annotationsByIndex.set(index, items);
+  });
   rows.forEach((r, i) => {
     const x = pad.l + step * (i + .5), color = r.close >= r.open ? COLORS.up : COLORS.down;
     ctx.strokeStyle = color; ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(x, y(r.high)); ctx.lineTo(x, y(r.low)); ctx.stroke();
@@ -93,6 +101,15 @@ export function drawCandles(canvas, rows, orders = [], sourceRows = rows) {
       ctx.moveTo(x, markerY); ctx.lineTo(x - 5, markerY - 8); ctx.lineTo(x + 5, markerY - 8); ctx.fill();
       ctx.fillText(`S${sells.length > 1 ? `×${sells.length}` : ''}${clockLabel(sell) ? ` ${clockLabel(sell)}` : ''}`, x, markerY - 11);
     }
+    const notes = annotationsByIndex.get(i) || [];
+    if (notes.length) {
+      const markerY = Math.max(pad.t + 11, y(r.high) - 25);
+      ctx.fillStyle = notes.some(note => note.verdict === 'negative') ? '#ff9da7'
+        : notes.some(note => note.verdict === 'positive') ? '#cf8cff' : '#a9d3ff';
+      ctx.beginPath(); ctx.arc(x, markerY, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#0a0e15'; ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'center';
+      ctx.fillText(notes.length > 1 ? String(notes.length) : '样', x, markerY + 3);
+    }
   });
   const drawAverage = (period, color) => {
     ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
@@ -111,6 +128,17 @@ export function drawCandles(canvas, rows, orders = [], sourceRows = rows) {
     ctx.fillStyle = color; ctx.fillText(`MA${period}`, pad.l + index * 46, 13);
   });
   ctx.fillStyle = COLORS.text; ctx.fillText(rows[0].time, pad.l, height - 8); ctx.textAlign = 'right'; ctx.fillText(rows.at(-1).time, width - pad.r, height - 8);
+}
+
+export function candleAtClientPoint(canvas, rows, clientX, clientY) {
+  if (!canvas || !rows?.length) return null;
+  const rect = canvas.getBoundingClientRect();
+  const pad = { l: 46, r: 16, t: 20, b: 34 };
+  const x = clientX - rect.left, y = clientY - rect.top;
+  if (x < pad.l || x > rect.width - pad.r || y < pad.t || y > rect.height - pad.b) return null;
+  const step = (rect.width - pad.l - pad.r) / rows.length;
+  const index = Math.max(0, Math.min(rows.length - 1, Math.floor((x - pad.l) / step)));
+  return { row: rows[index], index };
 }
 
 export function drawLine(canvas, rows) {

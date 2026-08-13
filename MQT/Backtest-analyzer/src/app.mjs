@@ -1,7 +1,11 @@
 import { parseQmtLog } from './parser.mjs?v=20260811-v210';
 import { fetchDaily, fetchThirtyMinute } from './market-data.mjs';
-import { drawCandles, drawScoreSeries } from './chart.mjs';
+import { candleAtClientPoint, drawCandles, drawScoreSeries } from './chart.mjs';
 import { sampleLog } from './sample-log.js';
+import {
+  actionLabels, importSamples, normalizeSample, readSamples, reasonLabels,
+  sampleExport, samplesToCsv, scopeLabels, setupLabels, verdictLabels, writeSamples,
+} from './sample-store.mjs?v=20260813-v220';
 
 const $ = selector => document.querySelector(selector);
 const state = {
@@ -9,6 +13,8 @@ const state = {
   cache: new Map(), chartRows: [], chartTrades: [], chartRequest: 0, indexRequest: 0,
   sectorChartType: 'kline', candidateStock: null, candidateRequest: 0,
   chartView: { bars: { daily: 80, '30m': 160 }, offset: { daily: 0, '30m': 0 } },
+  samples: readSamples(), sampleDraft: null, sampleEditingId: '', sampleCapture: false,
+  sampleReturnWorkspace: 'sample', candidateChartRows: [], candidateChartSourceRows: [],
 };
 const styles = { large: '大盘', mid: '中盘', small: '小盘', growth: '成长' };
 const indexes = { '000300.SH': '沪深300', '000905.SH': '中证500', '000852.SH': '中证1000', '399006.SZ': '创业板' };
@@ -22,6 +28,154 @@ const scoreText = value => value != null && Number.isFinite(Number(value)) ? Num
 const html = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const displayDate = value => { const digits = String(value || '').replace(/\D/g, ''); return digits.length >= 8 ? `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}` : '—'; };
 const displayTime = value => { const digits = String(value || '').replace(/\D/g, ''); return digits.length >= 4 ? `${digits.slice(0, 2)}:${digits.slice(2, 4)}${digits.length >= 6 ? `:${digits.slice(4, 6)}` : ''}` : '—'; };
+
+function rowDateTime(row = {}) {
+  const digits = String(row.time || '').replace(/\D/g, '');
+  return { date: digits.slice(0, 8), time: digits.length >= 12 ? `${digits.slice(8, 12)}00` : '' };
+}
+
+function selectedSector() {
+  return state.day?.sectors?.find(item => item.code === state.sectorCode && (!state.indexCode || item.style === state.indexCode)) || null;
+}
+
+function selectedIndex() {
+  return indexEntries(state.day).find(item => item.code === state.indexCode) || null;
+}
+
+function sampleSource() {
+  return {
+    webVersion: '2.2.0', strategy: state.report?.meta?.strategy || state.report?.meta?.engine || '',
+    backtestStart: state.report?.meta?.startTime || '', backtestEnd: state.report?.meta?.endTime || '',
+  };
+}
+
+function contextSnapshot({ stock = null, bar = null, timeframe = '1d' } = {}) {
+  const point = rowDateTime(bar || {});
+  const decisionDate = point.date || String(state.day?.date || '').replace(/\D/g, '').slice(0, 8);
+  const snapshotDay = state.report?.days?.find(day => String(day.date).replace(/\D/g, '').slice(0, 8) === decisionDate) || state.day;
+  const stockCode = stock?.code || state.candidateStock?.code || '';
+  const datedCandidate = stockCode ? dailyCandidates(snapshotDay).find(item => item.code === stockCode) : null;
+  const candidate = datedCandidate || stock || state.candidateStock || null;
+  const indexCode = datedCandidate?.style || state.indexCode;
+  const index = Object.entries(snapshotDay?.state?.scores || {}).map(([code, raw]) => ({
+    code, score: scoreValue(raw), regime: snapshotDay.state.regimes?.[code] || '',
+  })).find(item => item.code === indexCode) || null;
+  const sectorCode = datedCandidate?.sector || (snapshotDay?.date === state.day?.date ? state.sectorCode : '');
+  const sector = snapshotDay?.sectors?.find(item => item.code === sectorCode && (!indexCode || item.style === indexCode)) || null;
+  return {
+    decisionDate, decisionTime: point.time, timeframe, indexCode,
+    indexName: indexes[indexCode] || '', indexScore: index?.score,
+    regime: index?.regime || '', exposure: snapshotDay?.state?.exposure,
+    sectorCode, sectorScore: sector?.score,
+    stockCode: candidate?.code || '', stockName: candidate?.name || '',
+    candidate: {
+      score: candidate?.score, strength: candidate?.strength, strengthFit: candidate?.strengthFit,
+      entry: candidate?.entry, status: candidate?.status, setup: candidate?.setup,
+    },
+    bar: bar || {},
+  };
+}
+
+function defaultLabel(scope) {
+  return {
+    scope, verdict: 'uncertain', action: scope === 'market' || scope === 'sector' ? 'observe' : 'no_trade',
+    setup: scope === 'market' ? 'market_regime' : scope === 'sector' ? 'sector_rotation' : 'first_ma13_pullback',
+    confidence: 'medium', positionScale: null, reasons: [], summary: '', invalidation: '', notes: '',
+  };
+}
+
+function beginSample(scope, context, overrides = {}) {
+  state.sampleEditingId = '';
+  state.sampleDraft = { source: sampleSource(), context, label: { ...defaultLabel(scope), ...overrides } };
+  setWorkspace('sample');
+  renderSampleForm();
+}
+
+function sampleMarkers(code) {
+  return state.samples.filter(sample => sample.context?.stockCode === code).map(sample => ({
+    date: sample.context.decisionDate, time: sample.context.decisionTime,
+    verdict: sample.label.verdict, label: sample.label.action,
+  }));
+}
+
+function contextToken(label, value) {
+  return value == null || value === '' ? '' : `<span class="context-token">${html(label)} ${html(value)}</span>`;
+}
+
+function renderSampleForm() {
+  const draft = state.sampleDraft;
+  if (!draft) {
+    $('#sampleContext').className = 'sample-context empty';
+    $('#sampleContext').textContent = '从日期复盘、候选股或个股K线发起采集。';
+    return;
+  }
+  const context = draft.context || {}, label = draft.label || {};
+  $('#sampleContext').className = 'sample-context';
+  $('#sampleContext').innerHTML = `<strong>${html(context.stockCode ? `${context.stockCode} ${context.stockName || ''}` : context.sectorCode || context.indexName || '市场整体')} · ${displayDate(context.decisionDate)}${context.decisionTime ? ` ${displayTime(context.decisionTime)}` : ''}</strong><div class="sample-context-grid">${[
+    contextToken('周期', context.timeframe === '30m' ? '30分钟' : '日K'),
+    contextToken('指数', context.indexName || context.indexCode), contextToken('指数分', scoreText(context.indexScore)),
+    contextToken('状态', regimes[context.regime] || context.regime), contextToken('总仓位', pct(context.exposure)),
+    contextToken('板块', context.sectorCode?.replace(/^SW1_?/, '')), contextToken('板块分', scoreText(context.sectorScore)),
+    contextToken('入场分', scoreText(context.candidate?.entry)), contextToken('候选状态', context.candidate?.status),
+    contextToken('标点收盘', context.bar?.close == null ? '' : Number(context.bar.close).toFixed(2)),
+  ].join('')}</div>`;
+  $('#sampleScope').value = label.scope || 'stock_selection';
+  $('#sampleVerdict').value = label.verdict || 'uncertain';
+  $('#sampleAction').value = label.action || 'observe';
+  $('#sampleSetup').value = setupLabels[label.setup] ? label.setup : 'custom';
+  $('#sampleConfidence').value = label.confidence || 'medium';
+  $('#samplePositionScale').value = label.positionScale == null ? '' : String(label.positionScale);
+  $('#sampleSummary').value = label.summary || '';
+  $('#sampleInvalidation').value = label.invalidation || '';
+  $('#sampleNotes').value = label.notes || '';
+  document.querySelectorAll('#sampleReasons input').forEach(input => { input.checked = (label.reasons || []).includes(input.value); });
+  $('#sampleFormMessage').textContent = state.sampleEditingId ? '正在编辑已有样本' : '';
+  $('#sampleFormMessage').className = '';
+}
+
+function formLabel() {
+  return {
+    scope: $('#sampleScope').value, verdict: $('#sampleVerdict').value,
+    action: $('#sampleAction').value, setup: $('#sampleSetup').value,
+    confidence: $('#sampleConfidence').value,
+    positionScale: $('#samplePositionScale').value === '' ? null : Number($('#samplePositionScale').value),
+    reasons: [...document.querySelectorAll('#sampleReasons input:checked')].map(input => input.value),
+    summary: $('#sampleSummary').value, invalidation: $('#sampleInvalidation').value,
+    notes: $('#sampleNotes').value,
+  };
+}
+
+function renderSampleLibrary() {
+  const ordered = [...state.samples].sort((a, b) => `${b.context?.decisionDate || ''}${b.context?.decisionTime || ''}`.localeCompare(`${a.context?.decisionDate || ''}${a.context?.decisionTime || ''}`));
+  $('#sampleRows').innerHTML = ordered.length ? ordered.map(sample => {
+    const context = sample.context || {}, label = sample.label || {};
+    const subject = context.stockCode ? `${context.stockCode} ${context.stockName || ''}` : context.sectorCode?.replace(/^SW1_?/, '') || context.indexName || '市场整体';
+    return `<tr><td>${displayDate(context.decisionDate)}<br><small>${context.decisionTime ? displayTime(context.decisionTime) : context.timeframe === '30m' ? '30分钟' : '日K'}</small></td><td>${html(subject)}<br><small>${html(context.indexName || context.indexCode || '')}${context.sectorCode ? ` · ${html(context.sectorCode.replace(/^SW1_?/, ''))}` : ''}</small></td><td>${html(scopeLabels[label.scope] || label.scope)}</td><td><span class="sample-verdict ${html(label.verdict)}">${html(verdictLabels[label.verdict] || label.verdict)}</span><br><small>${html(label.confidence || '')}</small></td><td>${html(actionLabels[label.action] || label.action)}<br><small>${html(setupLabels[label.setup] || label.setup || '—')}</small></td><td>${html(label.summary || '—')}<br><small>${html((label.reasons || []).map(reason => reasonLabels[reason] || reason).join(' · '))}</small></td><td><div class="sample-row-actions"><button type="button" data-sample-edit="${html(sample.id)}">编辑</button><button type="button" data-sample-delete="${html(sample.id)}">删除</button></div></td></tr>`;
+  }).join('') : '<tr><td colspan="7" class="empty">尚未采集样本。请从日期复盘、候选股或个股K线开始。</td></tr>';
+  const positives = state.samples.filter(sample => sample.label?.verdict === 'positive').length;
+  const negatives = state.samples.filter(sample => sample.label?.verdict === 'negative').length;
+  $('#sampleLibrarySummary').innerHTML = state.samples.length ? `<strong>共 ${state.samples.length} 条</strong><br>正样本 ${positives} · 反样本 ${negatives} · 待研究 ${state.samples.length - positives - negatives}` : '尚未采集样本';
+  document.querySelectorAll('[data-sample-edit]').forEach(button => button.addEventListener('click', () => {
+    const sample = state.samples.find(item => item.id === button.dataset.sampleEdit);
+    if (!sample) return;
+    state.sampleEditingId = sample.id;
+    state.sampleDraft = JSON.parse(JSON.stringify(sample));
+    renderSampleForm();
+    $('#sampleForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }));
+  document.querySelectorAll('[data-sample-delete]').forEach(button => button.addEventListener('click', () => {
+    if (!window.confirm('确认删除这条样本？删除后只能从已导出的 JSON 恢复。')) return;
+    state.samples = state.samples.filter(item => item.id !== button.dataset.sampleDelete);
+    writeSamples(state.samples); renderSampleLibrary(); redrawChart(); renderCandidateChart();
+  }));
+}
+
+function downloadText(filename, content, type) {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(new Blob([content], { type }));
+  link.download = filename; link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 0);
+}
 
 function scoreValue(raw) {
   const value = raw && typeof raw === 'object' ? raw.score : raw;
@@ -200,12 +354,14 @@ function renderCandidates() {
     renderCandidates();
   }));
   $('#openStockDetail').disabled = !state.candidateStock;
+  $('#sampleCandidate').disabled = !state.candidateStock;
   renderCandidateChart();
 }
 
 async function renderCandidateChart() {
   const candidate = state.candidateStock, date = state.day?.date;
   if (!candidate || !date) {
+    state.candidateChartRows = []; state.candidateChartSourceRows = [];
     $('#candidateChartTitle').textContent = '选择候选股';
     $('#candidateChartNote').textContent = '当日没有可显示的候选股。';
     $('#candidateChartLoading').classList.add('hidden');
@@ -223,14 +379,17 @@ async function renderCandidateChart() {
     if (request !== state.candidateRequest || state.candidateStock?.code !== code || state.day?.date !== date) return;
     const end = String(date).replace(/\D/g, '');
     rows = rows.filter(row => String(row.time).replace(/\D/g, '').slice(0, 8) <= end);
+    state.candidateChartSourceRows = rows;
+    state.candidateChartRows = rows.slice(-90);
     const trades = stockTrading(code)?.trades || [];
-    drawCandles($('#candidateChart'), rows.slice(-90), trades, rows);
+    drawCandles($('#candidateChart'), state.candidateChartRows, trades, rows, sampleMarkers(code));
     $('#candidateChartNote').textContent = rows.length
       ? `日K · ${rows[0].time} — ${rows.at(-1).time} · MA7 / MA13 / MA40 · 入场评分 ${scoreText(candidate.entry)}，截止当前复盘日。`
       : '腾讯财经未返回该股在当前复盘日之前的日K。';
     $('#candidateChartLoading').classList.add('hidden');
   } catch (error) {
     if (request !== state.candidateRequest) return;
+    state.candidateChartRows = []; state.candidateChartSourceRows = [];
     drawCandles($('#candidateChart'), [], []);
     $('#candidateChartNote').textContent = `${error.message}，候选股评分仍可正常查看。`;
     $('#candidateChartLoading').classList.add('hidden');
@@ -307,7 +466,7 @@ function chartViewport() {
 function redrawChart() {
   if (!state.stock) return;
   if (!state.chartRows.length) { drawCandles($('#chart'), [], []); $('#chartRange').textContent = state.chartType === '30m' ? '腾讯财经暂未返回该股票的近期30分钟K数据。' : '该交易日暂无日K数据。'; return; }
-  const rows = chartViewport(); drawCandles($('#chart'), rows, state.chartTrades, state.chartRows);
+  const rows = chartViewport(); drawCandles($('#chart'), rows, state.chartTrades, state.chartRows, sampleMarkers(state.stock.code));
   const sourceStart = String(state.chartRows[0].time).replace(/\D/g, '').slice(0, 8), sourceEnd = String(state.chartRows.at(-1).time).replace(/\D/g, '').slice(0, 8);
   const covered = state.chartTrades.filter(trade => { const date = String(trade.date || '').replace(/\D/g, '').slice(0, 8); return date >= sourceStart && date <= sourceEnd; }).length;
   const coverage = state.chartType === 'daily' ? '覆盖全部买卖日期' : covered ? `分钟行情覆盖 ${covered}/${state.chartTrades.length} 个买卖点` : `有 ${state.chartTrades.length} 个买卖点在分钟行情范围外`;
@@ -346,7 +505,7 @@ function stepDay(offset) {
 function diagnostic() {
   const meta = state.report.meta;
   const legacyLinks = state.report.days.some(day => day.watchlist.some(item => !item.sector));
-  $('#diagnosticText').textContent = [`Web版本：V2.1.2 (2026-08-13)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
+  $('#diagnosticText').textContent = [`Web版本：V2.2.0 (2026-08-13)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, `本地研究样本：${state.samples.length} 条`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
 }
 
 function parse() {
@@ -365,6 +524,7 @@ function setWorkspace(name) {
   document.querySelectorAll('.workspace').forEach(section => section.classList.toggle('active', section.id === `${name}Workspace`));
   document.querySelectorAll('.workspace-tab').forEach(tab => { const active = tab.dataset.workspace === name; tab.classList.toggle('active', active); tab.setAttribute('aria-pressed', String(active)); });
   if (name === 'stock') requestAnimationFrame(redrawChart);
+  if (name === 'sample') { renderSampleForm(); renderSampleLibrary(); }
 }
 
 $('#sampleButton').addEventListener('click', () => { $('#logInput').value = sampleLog; $('.import-panel').classList.add('open'); parse(); });
@@ -393,10 +553,97 @@ $('#openStockDetail').addEventListener('click', () => {
   if (!state.candidateStock) return;
   setWorkspace('stock'); selectStock(state.candidateStock);
 });
+$('#sampleReview').addEventListener('click', () => {
+  const scope = state.sectorCode ? 'sector' : 'market';
+  beginSample(scope, contextSnapshot(), {
+    action: 'observe', setup: scope === 'market' ? 'market_regime' : 'sector_rotation',
+    reasons: scope === 'market' ? ['market'] : ['market', 'sector'],
+  });
+});
+$('#sampleCandidate').addEventListener('click', () => {
+  if (!state.candidateStock) return;
+  const date = String(state.day?.date || '').replace(/\D/g, '').slice(0, 8);
+  const bar = state.candidateChartSourceRows.find(row => String(row.time || '').replace(/\D/g, '').slice(0, 8) === date) || null;
+  beginSample('stock_selection', contextSnapshot({ stock: state.candidateStock, bar, timeframe: '1d' }), {
+    action: 'no_trade', reasons: ['market', 'sector', 'lifecycle', 'ma_structure'],
+  });
+});
 document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(item => { const active = item === tab; item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active)); });
   state.chartType = tab.dataset.chart; selectStock(state.stock);
 }));
+
+function setSampleCapture(active) {
+  state.sampleCapture = active;
+  $('#sampleChartPoint').classList.toggle('sample-capture-active', active);
+  $('.stock-chart').classList.toggle('capture', active);
+  $('#sampleChartPoint').textContent = active ? '取消标点' : '在K线上标点采样';
+}
+
+$('#sampleChartPoint').addEventListener('click', () => {
+  if (!state.stock) return;
+  state.sampleReturnWorkspace = 'sample';
+  setSampleCapture(!state.sampleCapture);
+});
+
+$('#samplePickPoint').addEventListener('click', async () => {
+  if (state.sampleDraft) state.sampleDraft.label = formLabel();
+  const code = state.sampleDraft?.context?.stockCode || state.stock?.code;
+  if (!code) {
+    $('#sampleFormMessage').textContent = '当前样本没有股票，市场/板块判断不需要K线标点。';
+    $('#sampleFormMessage').className = 'error';
+    return;
+  }
+  const candidate = candidateFor(code) || { code, name: state.sampleDraft?.context?.stockName || '' };
+  state.sampleReturnWorkspace = 'sample';
+  setWorkspace('stock');
+  await selectStock(candidate);
+  setSampleCapture(true);
+});
+
+$('#sampleForm').addEventListener('submit', event => {
+  event.preventDefault();
+  const message = $('#sampleFormMessage');
+  try {
+    const existing = state.samples.find(item => item.id === state.sampleEditingId);
+    const sample = normalizeSample({
+      ...(existing || {}), ...(state.sampleDraft || {}), id: state.sampleEditingId || state.sampleDraft?.id,
+      label: formLabel(), source: sampleSource(),
+    });
+    state.samples = existing ? state.samples.map(item => item.id === existing.id ? sample : item) : [...state.samples, sample];
+    writeSamples(state.samples); state.sampleEditingId = sample.id; state.sampleDraft = JSON.parse(JSON.stringify(sample));
+    message.textContent = '样本已保存到本机浏览器'; message.className = 'success';
+    renderSampleLibrary(); redrawChart(); renderCandidateChart();
+  } catch (error) {
+    message.textContent = error.message; message.className = 'error';
+  }
+});
+
+$('#sampleReset').addEventListener('click', () => {
+  state.sampleEditingId = ''; state.sampleDraft = null; $('#sampleForm').reset();
+  renderSampleForm(); $('#sampleFormMessage').textContent = '';
+});
+
+$('#sampleExportJson').addEventListener('click', () => {
+  const payload = sampleExport(state.samples, sampleSource());
+  downloadText(`qmt-standard-samples-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
+});
+$('#sampleExportCsv').addEventListener('click', () => {
+  downloadText(`qmt-standard-samples-${new Date().toISOString().slice(0, 10)}.csv`, `\ufeff${samplesToCsv(state.samples)}`, 'text/csv;charset=utf-8');
+});
+$('#sampleImport').addEventListener('change', async event => {
+  const file = event.target.files[0]; if (!file) return;
+  const message = $('#sampleFormMessage');
+  try {
+    const imported = importSamples(await file.text());
+    const byId = new Map(state.samples.map(sample => [sample.id, sample]));
+    imported.forEach(sample => byId.set(sample.id, sample));
+    state.samples = [...byId.values()]; writeSamples(state.samples); renderSampleLibrary();
+    message.textContent = `已导入 ${imported.length} 条样本`; message.className = 'success';
+  } catch (error) {
+    message.textContent = `导入失败：${error.message}`; message.className = 'error';
+  } finally { event.target.value = ''; }
+});
 
 const chartCard = $('#chartCard'), resizeHandle = $('#chartResizeHandle'), minChartWidth = 620, chartWidthKey = 'qmt-chart-width-v2';
 function chartWidthBounds() { return { min: Math.min(minChartWidth, chartCard.parentElement.clientWidth), max: chartCard.parentElement.clientWidth }; }
@@ -422,6 +669,7 @@ window.addEventListener('resize', () => setChartWidth(chartCard.getBoundingClien
 const chartCanvas = $('#chart');
 chartCanvas.addEventListener('wheel', event => { event.preventDefault(); zoomChart(event.deltaY < 0 ? .8 : 1.25); }, { passive: false });
 chartCanvas.addEventListener('pointerdown', event => {
+  if (state.sampleCapture) return;
   if (event.button !== 0 || !state.chartRows.length) return;
   const startX = event.clientX, startOffset = state.chartView.offset[state.chartType], visible = chartViewport().length, step = Math.max((chartCanvas.clientWidth - 62) / Math.max(visible, 1), 1);
   chartCanvas.setPointerCapture(event.pointerId);
@@ -429,9 +677,25 @@ chartCanvas.addEventListener('pointerdown', event => {
   const end = () => { chartCanvas.removeEventListener('pointermove', move); chartCanvas.removeEventListener('pointerup', end); chartCanvas.removeEventListener('pointercancel', end); };
   chartCanvas.addEventListener('pointermove', move); chartCanvas.addEventListener('pointerup', end); chartCanvas.addEventListener('pointercancel', end);
 });
+chartCanvas.addEventListener('click', event => {
+  if (!state.sampleCapture || !state.stock) return;
+  const rows = chartViewport(), hit = candleAtClientPoint(chartCanvas, rows, event.clientX, event.clientY);
+  if (!hit) return;
+  const existingLabel = state.sampleDraft?.label || defaultLabel('trade_point');
+  state.sampleDraft = {
+    ...(state.sampleDraft || {}), source: sampleSource(),
+    context: contextSnapshot({ stock: state.stock, bar: hit.row, timeframe: state.chartType }),
+    label: { ...existingLabel, scope: existingLabel.scope || 'trade_point' },
+  };
+  setSampleCapture(false); setWorkspace(state.sampleReturnWorkspace || 'sample'); renderSampleForm();
+  $('#sampleFormMessage').textContent = `已选择 ${hit.row.time} 的K线`;
+  $('#sampleFormMessage').className = 'success';
+});
 chartCanvas.addEventListener('keydown', event => {
   if (!['+', '=', '-', '_', 'ArrowLeft', 'ArrowRight', 'Home', 'End', '0'].includes(event.key)) return; event.preventDefault();
   if (event.key === '+' || event.key === '=') zoomChart(.8); else if (event.key === '-' || event.key === '_') zoomChart(1.25); else if (event.key === 'ArrowLeft') panChart(Math.max(1, Math.round(state.chartView.bars[state.chartType] / 6))); else if (event.key === 'ArrowRight') panChart(-Math.max(1, Math.round(state.chartView.bars[state.chartType] / 6))); else if (event.key === 'Home') panChart(Number.MAX_SAFE_INTEGER); else if (event.key === 'End') panChart(-Number.MAX_SAFE_INTEGER); else resetChartView();
 });
 
+$('#sampleReasons').innerHTML = Object.entries(reasonLabels).map(([value, label]) => `<label class="reason-option"><input type="checkbox" value="${html(value)}">${html(label)}</label>`).join('');
+renderSampleLibrary();
 $('#logInput').value = sampleLog; parse();

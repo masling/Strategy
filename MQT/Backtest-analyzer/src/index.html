@@ -4,12 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>QMT 回测分析器</title>
-  <link rel="stylesheet" href="./styles.css?v=20260813-v212">
+  <link rel="stylesheet" href="./styles.css?v=20260813-v220">
 </head>
 <body>
   <header>
     <div>
-      <span class="eyebrow">QMT STRATEGY LAB · V2.1.2</span>
+      <span class="eyebrow">QMT STRATEGY LAB · V2.2.0</span>
       <h1>回测复盘工作台</h1>
       <p>先核对当日指数、板块和入场候选，再下钻到单股买卖细节。</p>
     </div>
@@ -33,14 +33,16 @@
       <div id="backtestStats" class="metric-grid overview-grid empty">导入日志后显示</div>
     </article>
 
-    <nav class="workspace-tabs" aria-label="分析工作区">
+    <nav class="workspace-tabs three-tabs" aria-label="分析工作区">
       <button class="workspace-tab active" data-workspace="review" aria-pressed="true"><b>1</b><span>日期复盘<small>指数 → 板块 → 候选股</small></span></button>
       <button class="workspace-tab" data-workspace="stock" aria-pressed="false"><b>2</b><span>个股操盘<small>买卖时间 · 数量 · K线</small></span></button>
+      <button class="workspace-tab" data-workspace="sample" aria-pressed="false"><b>3</b><span>样本采集<small>判断 · 标点 · 原因 · 导出</small></span></button>
     </nav>
 
     <section id="reviewWorkspace" class="workspace active">
       <div class="review-toolbar">
         <div><span class="eyebrow">DAILY REVIEW</span><h2>按交易日还原策略决策链</h2></div>
+        <button id="sampleReview" type="button">记录当前市场/板块判断</button>
         <div class="date-control">
           <label class="date-label" for="dateSelect">交易日 <small id="dateProgress"></small></label>
           <div class="date-nav"><button id="previousDay" type="button" aria-label="上一个交易日">← 上一天</button><select id="dateSelect"></select><button id="nextDay" type="button" aria-label="下一个交易日">下一天 →</button></div>
@@ -68,7 +70,7 @@
         <div class="table-wrap candidate-table"><table><thead><tr><th>代码 / 名称</th><th>所属</th><th>综合</th><th>强度</th><th>匹配</th><th>入场</th><th>状态</th><th>目标 / 当日操作</th></tr></thead><tbody id="candidateRows"></tbody></table></div>
         <p id="candidateNote" class="data-note"></p>
         <div class="candidate-kline">
-          <div class="chart-head"><div><div class="section-title"><span>03K</span>候选股日K与均线</div><h2 id="candidateChartTitle">选择候选股</h2></div><button id="openStockDetail" type="button" disabled>打开完整操盘详情 →</button></div>
+          <div class="chart-head"><div><div class="section-title"><span>03K</span>候选股日K与均线</div><h2 id="candidateChartTitle">选择候选股</h2></div><div class="chart-head-actions"><button id="sampleCandidate" type="button" disabled>采集当前候选</button><button id="openStockDetail" type="button" disabled>打开完整操盘详情 →</button></div></div>
           <div class="chart-shell candidate-chart"><canvas id="candidateChart" aria-label="候选股日K图"></canvas><div id="candidateChartLoading" class="chart-loading hidden"></div></div>
           <p id="candidateChartNote" class="data-note">点击上方候选股，在当前复盘页直接查看日K、MA7、MA13和MA40。</p>
         </div>
@@ -88,6 +90,7 @@
             <label class="stock-picker">筛选<input id="stockFilterInput" type="search" placeholder="输入代码或名称" autocomplete="off" aria-label="按股票代码或名称筛选"></label>
             <label class="stock-picker">股票<select id="chartStockSelect"><option value="">无买卖记录</option></select></label>
             <div class="tabs"><button class="tab active" data-chart="daily" aria-pressed="true">日K</button><button class="tab" data-chart="30m" aria-pressed="false">30 分钟K</button></div>
+            <button id="sampleChartPoint" type="button">在K线上标点采样</button>
           </div>
         </div>
         <div id="tradeChips" class="trade-chips"></div>
@@ -102,8 +105,50 @@
       </article>
     </section>
 
+    <section id="sampleWorkspace" class="workspace">
+      <article class="sample-collector">
+        <div class="stage-head">
+          <div><div class="section-title"><span>01</span>标准化判断样本</div><h2>记录当时可见的信息和预期动作</h2></div>
+          <div class="sample-tools">
+            <label class="file-button">导入样本JSON<input id="sampleImport" type="file" accept=".json,application/json"></label>
+            <button id="sampleExportJson" type="button">导出 JSON</button>
+            <button id="sampleExportCsv" type="button">导出 CSV</button>
+          </div>
+        </div>
+        <p class="data-note sample-guidance">人工判断用于定义目标形态；未来涨跌只作为后验评价，不写入当日原因。市场、板块、个股和买卖点分层保存。</p>
+        <div class="sample-layout">
+          <form id="sampleForm" class="sample-form">
+            <div id="sampleContext" class="sample-context empty">从日期复盘、候选股或个股K线发起采集。</div>
+            <div class="sample-field-grid">
+              <label>判断层级<select id="sampleScope" required><option value="market">市场判断</option><option value="sector">板块判断</option><option value="stock_selection">个股选择</option><option value="trade_point">买卖点</option></select></label>
+              <label>样本结论<select id="sampleVerdict" required><option value="positive">正样本</option><option value="negative">反样本</option><option value="uncertain">待研究</option></select></label>
+              <label>预期动作<select id="sampleAction" required><option value="observe">观察</option><option value="no_trade">不参与</option><option value="open">首仓</option><option value="add">加仓</option><option value="addback">加回</option><option value="hold">继续持有</option><option value="trim">减交易仓</option><option value="reduce_core">减主仓</option><option value="exit">清仓</option><option value="risk_on">提高仓位</option><option value="risk_off">降低仓位</option></select></label>
+              <label>形态分类<select id="sampleSetup"><option value="first_ma13_pullback">首次深回MA13</option><option value="ma7_trend_hold">MA7趋势支撑</option><option value="ma40_restart">MA40启动/再启动</option><option value="bottom_cross">底部7/13交叉</option><option value="ma13_addback">MA13加回</option><option value="volume_spike_fade">冲高回落</option><option value="failed_reclaim">收复失败</option><option value="ma13_breakdown">MA13破位</option><option value="sector_rotation">板块轮动</option><option value="market_regime">市场状态</option><option value="custom">其他形态</option></select></label>
+              <label>置信度<select id="sampleConfidence"><option value="high">高</option><option value="medium" selected>中</option><option value="low">低</option></select></label>
+              <label>预期仓位<select id="samplePositionScale"><option value="">不指定</option><option value="0">0%</option><option value="0.1">10%</option><option value="0.2">20%</option><option value="0.3">30%</option><option value="0.4">40%</option><option value="0.5">50%</option><option value="0.6">60%</option></select></label>
+            </div>
+            <fieldset><legend>判断维度（可多选）</legend><div id="sampleReasons" class="reason-options"></div></fieldset>
+            <label>判断原因<textarea id="sampleSummary" class="sample-textarea" required placeholder="只写决策时点已经可见的信息，例如：高点后首次直接深回MA13，中间未在MA7形成成交密集平台……"></textarea></label>
+            <label>失效条件<textarea id="sampleInvalidation" class="sample-textarea compact" placeholder="例如：尾盘重新跌破MA13，或次日一小时内无法站回则减仓"></textarea></label>
+            <label>研究备注<textarea id="sampleNotes" class="sample-textarea compact" placeholder="待核对问题、相似案例、后续研究方向"></textarea></label>
+            <div class="sample-form-actions"><button id="samplePickPoint" type="button">去个股K线重新标点</button><span id="sampleFormMessage" role="status"></span><button id="sampleReset" type="button">重置</button><button class="primary" type="submit">保存样本</button></div>
+          </form>
+          <aside class="sample-principles">
+            <h3>采集检查</h3>
+            <ol><li>先写市场和板块背景</li><li>再判断个股生命周期</li><li>同时考虑空间、时间、量能和筹码</li><li>30分钟只定位执行时点</li><li>明确动作级别和失效条件</li></ol>
+            <p>点击个股日K或30分钟K可选择最近一根K线，标点会保存开高低收、成交量及当时的指数、板块和候选评分。</p>
+          </aside>
+        </div>
+      </article>
+
+      <article class="sample-library">
+        <div class="stage-head"><div><div class="section-title"><span>02</span>样本库</div><h2>可供研究脚本读取的标准记录</h2></div><div id="sampleLibrarySummary" class="stage-summary empty">尚未采集样本</div></div>
+        <div class="table-wrap sample-table"><table><thead><tr><th>日期 / 标点</th><th>对象</th><th>层级</th><th>结论</th><th>动作 / 形态</th><th>判断原因</th><th>操作</th></tr></thead><tbody id="sampleRows"></tbody></table></div>
+      </article>
+    </section>
+
     <section class="diagnostics"><details><summary>解析信息与警告</summary><pre id="diagnosticText"></pre></details></section>
   </main>
-  <script type="module" src="./app.mjs?v=20260813-v212"></script>
+  <script type="module" src="./app.mjs?v=20260813-v220"></script>
 </body>
 </html>
