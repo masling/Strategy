@@ -1,5 +1,5 @@
 #coding:gbk
-# DOWNLOAD_BUILD: V2.4.9_20260812_INTRADAY_MA13_CONFIRM
+# DOWNLOAD_BUILD: V2.5.0_20260813_FRESH_MA13_PULLBACK
 
 import datetime
 
@@ -8,7 +8,7 @@ import pandas as pd
 
 
 RUN_MODE = "BACKTEST"
-STRATEGY_NAME = "QMT_MC_ROTATION_V2_4_9"
+STRATEGY_NAME = "QMT_MC_ROTATION_V2_5_0"
 BACKTEST_INITIAL_CAPITAL = 1000000.0
 BACKTEST_SLIPPAGE_BPS = 10.0
 REBALANCE_EVERY = 5
@@ -114,10 +114,14 @@ BOTTOM_CROSS_MAX_DISTANCE_MA40 = 0.10
 MA13_NO_REBOUND_REDUCE_RATIO = 0.50
 MA13_NO_REBOUND_REDUCE_DAYS = 3
 MA13_MAX_BREAK_DAYS = 4
-INTRADAY_ENTRY_WATCH_PER_STYLE = 6
+INTRADAY_ENTRY_WATCH_PER_STYLE = 3
 INTRADAY_ENTRY_POSITION_SCALE = 0.35
 INTRADAY_ENTRY_SUPPORT_TOLERANCE = 0.012
 INTRADAY_ENTRY_MIN_RECLAIM_VOLUME_RATIO = 0.70
+INTRADAY_ENTRY_MIN_FIRST_PULLBACK_SCORE = 85.0
+INTRADAY_ENTRY_EARLY_FAILURE_REDUCE_RATIO = 0.50
+INTRADAY_ENTRY_EARLY_FAILURE_MAX_CALENDAR_DAYS = 4
+INTRADAY_ENTRY_EARLY_FAILURE_LATEST_MINUTE = 14 * 60 + 30
 INTRADAY_EXTENSION_MIN_DISTANCE_MA7 = 0.08
 INTRADAY_EXTENSION_MAX_VOLUME_RATIO = 1.20
 STARTER_MAX_MA7_MA13_GAP = 0.015
@@ -1958,6 +1962,50 @@ def intraday_ma13_reclaim_entry_signal(frame30, daily_metrics):
     )
 
 
+def intraday_ma13_reclaim_early_failure_signal(frame30, daily_metrics):
+    """Detect a late-session loss of MA13 immediately after a starter entry."""
+    if not daily_metrics or frame30 is None or len(frame30) < 2:
+        return False
+    data = frame30.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=["close"]
+    )
+    if len(data) < 2:
+        return False
+    index = _datetime_index(data.index)
+    latest_day = index[-1].normalize()
+    same_day = data[index.normalize() == latest_day].copy()
+    same_index = index[index.normalize() == latest_day]
+    if len(same_day) < 2:
+        return False
+    latest_time = same_index[-1]
+    latest_minute = latest_time.hour * 60 + latest_time.minute
+    if latest_minute < INTRADAY_ENTRY_EARLY_FAILURE_LATEST_MINUTE:
+        return False
+    ma13 = float(daily_metrics.get("ma13", 0.0))
+    if ma13 <= 0.0:
+        return False
+    previous_close = float(same_day.iloc[-2]["close"])
+    latest_close = float(same_day.iloc[-1]["close"])
+    return bool(
+        previous_close < ma13 * (1.0 - INTRADAY_STAND_TOLERANCE)
+        and latest_close < ma13 * (1.0 - INTRADAY_STAND_TOLERANCE)
+    )
+
+
+def intraday_entry_early_protection_active(meta, trade_date):
+    if str((meta or {}).get("setup", "")) != "intraday_ma13_reclaim":
+        return False
+    entry_date = str((meta or {}).get("entry_date", ""))
+    if not entry_date:
+        return False
+    try:
+        age = (pd.Timestamp(str(trade_date)).normalize()
+               - pd.Timestamp(entry_date).normalize()).days
+    except Exception:
+        return False
+    return 0 <= age <= INTRADAY_ENTRY_EARLY_FAILURE_MAX_CALENDAR_DAYS
+
+
 def intraday_entry_target_shares(snapshot, style_exposures, candidate, price):
     if price <= 0.0:
         return 0
@@ -2021,6 +2069,9 @@ def _attempt_intraday_ma13_entry(context, snapshot, candidate, bars30,
         "entry_price": price,
         "below_ma13_days": 0,
         "ma13_reduced": False,
+        "entry_date": str(trade_date),
+        "entry_ma13": float(metrics["ma13"]),
+        "setup": "intraday_ma13_reclaim",
         "style": candidate.get("style"),
         "sector": candidate.get("sector"),
     }
@@ -2028,6 +2079,52 @@ def _attempt_intraday_ma13_entry(context, snapshot, candidate, bars30,
         "INTRADAY_ENTRY", trade_date, code, "ma13_reclaim",
         "support", round(float(metrics["ma13"]), 4),
         "price", round(price, 4), "volume", volume,
+    )
+    return True
+
+
+def _reduce_intraday_entry_early_failure(context, position, code, bars30,
+                                          daily_metrics, trade_date,
+                                          execution_price):
+    """Mark a same-day failure and reduce the starter as soon as T+1 allows."""
+    meta = A.position_meta.get(code, {})
+    if not intraday_entry_early_protection_active(meta, trade_date):
+        return False
+    metrics = daily_metrics or {"ma13": meta.get("entry_ma13", 0.0)}
+    failed = bool(meta.get("early_failure_pending", False))
+    if not failed:
+        failed = intraday_ma13_reclaim_early_failure_signal(bars30, metrics)
+    if not failed:
+        return False
+    current = int(position.get("volume", 0))
+    available = int(position.get("available", 0))
+    volume = int(
+        current * INTRADAY_ENTRY_EARLY_FAILURE_REDUCE_RATIO / 100.0
+    ) * 100
+    volume = min(volume, available)
+    if volume < 100:
+        if not meta.get("early_failure_pending", False):
+            print(
+                "INTRADAY_ENTRY_FAIL_MARK", trade_date, code,
+                "ma13", round(float(metrics.get("ma13", 0.0)), 4),
+                "t1_pending",
+            )
+        meta["early_failure_pending"] = True
+        A.position_meta[code] = meta
+        return True
+    if not _send_order(
+            context, "sell", code, volume, trade_date,
+            "intraday_entry_early_failure", execution_price):
+        return True
+    remaining = max(0, current - volume)
+    A.desired_shares[code] = remaining
+    A.intraday_scales[code] = float(remaining) / max(current, 1)
+    meta["early_failure_pending"] = False
+    A.position_meta[code] = meta
+    print(
+        "INTRADAY_ENTRY_FAIL_REDUCE", trade_date, code,
+        "ma13", round(float(metrics.get("ma13", 0.0)), 4),
+        "volume", volume,
     )
     return True
 
@@ -3173,7 +3270,7 @@ def intraday_entry_daily_metrics(candidate):
 
 
 def intraday_entry_watch_eligible(candidate):
-    """Keep a broad but structurally sound pool for same-day MA13 reclaims."""
+    """Watch only a fresh, deep MA13 pullback for an intraday reclaim."""
     feature = (candidate or {}).get("feature", {})
     ma7 = float(feature.get("ma7", 0.0))
     ma13 = float(feature.get("ma13", 0.0))
@@ -3187,6 +3284,38 @@ def intraday_entry_watch_eligible(candidate):
     if float(feature.get("distance_ma40", 1.0)) > FIRST_MA13_PULLBACK_MAX_DISTANCE_MA40:
         return False
     if float(candidate.get("strength_score", 0.0)) > ENTRY_MAX_STRENGTH_SCORE:
+        return False
+    gap7 = float(feature.get("ma7_ma13_gap", 0.0))
+    gap13 = float(feature.get("ma13_ma40_gap", 0.0))
+    # A narrow 7/13 gap versus a much wider 13/40 gap means price has
+    # already spent too long leaning on MA7 before the MA13 test.
+    if gap13 <= 0.0 or gap7 / gap13 < 0.45:
+        return False
+    # This watch exists for the first deep pullback after an extended leg,
+    # not for names that have already spent several days leaning on MA7.
+    if float(feature.get("first_pullback_score", 0.0)) < (
+            INTRADAY_ENTRY_MIN_FIRST_PULLBACK_SCORE
+    ):
+        return False
+    if float(feature.get("first_pullback_peak_extension", 0.0)) < (
+            FIRST_MA13_PULLBACK_MIN_PEAK_EXTENSION
+    ):
+        return False
+    if float(feature.get("first_pullback_depth", 0.0)) < (
+            FIRST_MA13_PULLBACK_MIN_DEPTH
+    ):
+        return False
+    if int(feature.get("first_pullback_days_from_peak", 0)) < (
+            FIRST_MA13_PULLBACK_MIN_DAYS_FROM_PEAK
+    ) or int(feature.get("first_pullback_days_from_peak", 0)) > (
+            FIRST_MA13_PULLBACK_MAX_DAYS_FROM_PEAK
+    ):
+        return False
+    if int(feature.get("first_pullback_prior_touches", 1)) != 0:
+        return False
+    if float(feature.get("first_pullback_correction_turnover_days", 0.0)) < (
+            FIRST_MA13_PULLBACK_MIN_CORRECTION_TURNOVER_DAYS
+    ):
         return False
     return intraday_entry_daily_metrics(candidate) is not None
 
@@ -3892,11 +4021,18 @@ def run_intraday_cycle(context, end_time, trade_date):
     )
     for item in entry_watch:
         candidate_map.setdefault(item["code"], item)
+    early_protection_codes = {
+        code for code in positions
+        if intraday_entry_early_protection_active(
+            A.position_meta.get(code, {}), trade_date
+        )
+    }
     position_codes = (
         set(positions.keys()) & (
             set(candidate_map.keys())
             | set(A.build_plans.keys())
             | set(A.build_confirm_plans.keys())
+            | early_protection_codes
         )
     )
     entry_codes = {
@@ -3927,6 +4063,16 @@ def run_intraday_cycle(context, end_time, trade_date):
             )
             continue
         daily_metrics = A.daily_position_metrics.get(code, feature)
+        if not daily_metrics:
+            entry_ma13 = float((A.position_meta.get(code) or {}).get(
+                "entry_ma13", 0.0
+            ))
+            if entry_ma13 > 0.0:
+                daily_metrics = {"ma13": entry_ma13}
+        if _reduce_intraday_entry_early_failure(
+                context, positions[code], code, bars30, daily_metrics,
+                trade_date, execution_prices.get(code)):
+            continue
 
         confirm_plan = A.build_confirm_plans.get(code)
         if (confirm_plan

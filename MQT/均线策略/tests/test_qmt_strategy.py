@@ -1614,6 +1614,59 @@ class IntradayAggregationTests(unittest.TestCase):
             "intraday_ma13_reclaim_entry_signal", frame, daily_metrics
         ))
 
+    def test_intraday_watch_requires_fresh_deep_first_pullback(self):
+        candidate = {
+            "strength_score": 70.0,
+            "feature": {
+                "close": 101.0, "raw_signal_close": 20.0,
+                "ma7": 106.0, "ma13": 100.0, "ma40": 90.0,
+                "ma13_slope3": 0.01, "ma40_slope5": 0.01,
+                "distance_ma40": 0.12,
+                "ma7_ma13_gap": 0.07, "ma13_ma40_gap": 0.111,
+                "first_pullback_score": 90.0,
+                "first_pullback_peak_extension": 0.10,
+                "first_pullback_depth": 0.08,
+                "first_pullback_days_from_peak": 3,
+                "first_pullback_prior_touches": 0,
+                "first_pullback_correction_turnover_days": 2.5,
+            },
+        }
+        self.assertTrue(invoke("intraday_entry_watch_eligible", candidate))
+        shallow_gap = {
+            "strength_score": candidate["strength_score"],
+            "feature": dict(candidate["feature"]),
+        }
+        shallow_gap["feature"]["ma7_ma13_gap"] = 0.02
+        self.assertFalse(invoke(
+            "intraday_entry_watch_eligible", shallow_gap
+        ))
+        reused_support = {
+            "strength_score": candidate["strength_score"],
+            "feature": dict(candidate["feature"]),
+        }
+        reused_support["feature"]["first_pullback_prior_touches"] = 1
+        self.assertFalse(invoke(
+            "intraday_entry_watch_eligible", reused_support
+        ))
+
+    def test_intraday_entry_late_ma13_failure_is_detected(self):
+        frame = pd.DataFrame({
+            "open": [9.98, 9.94], "high": [10.02, 9.98],
+            "low": [9.90, 9.86], "close": [9.93, 9.89],
+            "volume": [100.0, 120.0],
+        }, index=pd.to_datetime([
+            "2026-08-03 14:00", "2026-08-03 14:30",
+        ]))
+        self.assertTrue(invoke(
+            "intraday_ma13_reclaim_early_failure_signal", frame,
+            {"ma13": 10.0},
+        ))
+        frame.iloc[-1, frame.columns.get_loc("close")] = 10.02
+        self.assertFalse(invoke(
+            "intraday_ma13_reclaim_early_failure_signal", frame,
+            {"ma13": 10.0},
+        ))
+
     def test_starter_ma7_add_keeps_daily_smoothness_guard(self):
         frame = pd.DataFrame({
             "open": [9.98, 10.08], "high": [10.15, 10.3],
