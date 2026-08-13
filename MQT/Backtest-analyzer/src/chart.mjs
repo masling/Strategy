@@ -1,4 +1,8 @@
-const COLORS = { up: '#ef5350', down: '#19a974', grid: '#263248', text: '#8d9bb3', average: '#f6c85f', ma7: '#f6c85f', ma13: '#6fb7ff', ma40: '#cf8cff' };
+const COLORS = {
+  up: '#ef5350', down: '#19a974', grid: '#263248', text: '#8d9bb3', amber: '#ffcf5c',
+  average: '#f6c85f', ma7: '#f6c85f', ma13: '#6fb7ff', ma40: '#cf8cff',
+  volume5: '#f6c85f', volume20: '#6fb7ff',
+};
 
 function setup(canvas) {
   const ratio = window.devicePixelRatio || 1;
@@ -13,17 +17,33 @@ function empty(ctx, width, height, text) {
   ctx.fillText(text, width / 2, height / 2);
 }
 
-function movingAverages(rows, periods) {
+function movingFieldAverages(rows, periods, field) {
   const sums = Object.fromEntries(periods.map(period => [period, 0]));
   return rows.map((row, index) => {
     const values = {};
     periods.forEach(period => {
-      sums[period] += row.close;
-      if (index >= period) sums[period] -= rows[index - period].close;
+      sums[period] += Number(row[field]) || 0;
+      if (index >= period) sums[period] -= Number(rows[index - period][field]) || 0;
       values[period] = index >= period - 1 ? sums[period] / period : null;
     });
     return values;
   });
+}
+
+function movingAverages(rows, periods) {
+  return movingFieldAverages(rows, periods, 'close');
+}
+
+export function volumeAverages(rows, periods = [5, 20]) {
+  return movingFieldAverages(rows, periods, 'volume');
+}
+
+function compactVolume(value) {
+  if (!Number.isFinite(Number(value))) return '—';
+  const number = Number(value);
+  if (Math.abs(number) >= 100000000) return `${(number / 100000000).toFixed(2)}亿`;
+  if (Math.abs(number) >= 10000) return `${(number / 10000).toFixed(2)}万`;
+  return number.toFixed(0);
 }
 
 function tradeDate(value) {
@@ -48,11 +68,17 @@ function clockLabel(order) {
 export function drawCandles(canvas, rows, orders = [], sourceRows = rows, annotations = []) {
   const { ctx, width, height } = setup(canvas); ctx.clearRect(0, 0, width, height);
   if (!rows.length) return empty(ctx, width, height, '暂无K线数据');
-  const pad = { l: 46, r: 16, t: 20, b: 34 }, chartH = height - pad.t - pad.b;
+  const pad = { l: 46, r: 16, t: 20, b: 25 };
+  const usableH = height - pad.t - pad.b, volumeGap = 25;
+  const volumeH = Math.max(48, usableH * .21), chartH = Math.max(80, usableH - volumeGap - volumeH);
+  const priceBottom = pad.t + chartH, volumeTop = priceBottom + volumeGap, volumeBottom = volumeTop + volumeH;
   const periods = [7, 13, 40];
   const sourceAverages = movingAverages(sourceRows, periods);
+  const sourceVolumeAverages = volumeAverages(sourceRows);
   const averageByTime = new Map(sourceRows.map((row, index) => [row.time, sourceAverages[index]]));
+  const volumeAverageByTime = new Map(sourceRows.map((row, index) => [row.time, sourceVolumeAverages[index]]));
   const visibleAverages = rows.map(row => averageByTime.get(row.time));
+  const visibleVolumeAverages = rows.map(row => volumeAverageByTime.get(row.time));
   const averageValues = visibleAverages.flatMap(values => periods.map(period => values?.[period]).filter(Number.isFinite));
   const min = Math.min(...rows.map(r => r.low), ...averageValues), max = Math.max(...rows.map(r => r.high), ...averageValues);
   const y = value => pad.t + (max - value) / Math.max(max - min, 0.01) * chartH;
@@ -62,6 +88,7 @@ export function drawCandles(canvas, rows, orders = [], sourceRows = rows, annota
     const py = pad.t + chartH * i / 4; ctx.beginPath(); ctx.moveTo(pad.l, py); ctx.lineTo(width - pad.r, py); ctx.stroke();
     ctx.fillText((max - (max - min) * i / 4).toFixed(2), 3, py + 4);
   }
+  ctx.strokeStyle = COLORS.grid; ctx.beginPath(); ctx.moveTo(pad.l, priceBottom + 10); ctx.lineTo(width - pad.r, priceBottom + 10); ctx.stroke();
   const tradesByIndex = new Map();
   orders.forEach(order => {
     const index = rowForTrade(rows, order);
@@ -90,7 +117,7 @@ export function drawCandles(canvas, rows, orders = [], sourceRows = rows, annota
     const sell = sells[0];
     ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center';
     if (buy) {
-      const markerY = Math.min(height - pad.b - 4, y(r.low) + 13);
+      const markerY = Math.min(priceBottom - 4, y(r.low) + 13);
       ctx.fillStyle = '#ffcf5c'; ctx.beginPath();
       ctx.moveTo(x, markerY); ctx.lineTo(x - 5, markerY + 8); ctx.lineTo(x + 5, markerY + 8); ctx.fill();
       ctx.fillText(`B${buys.length > 1 ? `×${buys.length}` : ''}${clockLabel(buy) ? ` ${clockLabel(buy)}` : ''}`, x, markerY + 19);
@@ -123,17 +150,54 @@ export function drawCandles(canvas, rows, orders = [], sourceRows = rows, annota
     if (started) ctx.stroke();
   };
   drawAverage(7, COLORS.ma7); drawAverage(13, COLORS.ma13); drawAverage(40, COLORS.ma40);
+
+  const volumeValues = rows.map(row => Number(row.volume)).filter(Number.isFinite);
+  const volumeAverageValues = visibleVolumeAverages.flatMap(values => [values?.[5], values?.[20]]).filter(Number.isFinite);
+  const volumeMax = Math.max(...volumeValues, ...volumeAverageValues, 1);
+  const volumeY = value => volumeBottom - Number(value || 0) / volumeMax * volumeH;
+  rows.forEach((row, index) => {
+    const x = pad.l + step * (index + .5), color = row.close >= row.open ? COLORS.up : COLORS.down;
+    const top = volumeY(row.volume);
+    ctx.globalAlpha = .68; ctx.fillStyle = color;
+    ctx.fillRect(x - Math.max(1, step * .28), top, Math.max(2, step * .56), Math.max(1, volumeBottom - top));
+  });
+  ctx.globalAlpha = 1;
+  const drawVolumeAverage = (period, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.beginPath();
+    let started = false;
+    visibleVolumeAverages.forEach((values, index) => {
+      const value = values?.[period];
+      if (!Number.isFinite(value)) return;
+      const x = pad.l + step * (index + .5);
+      if (started) ctx.lineTo(x, volumeY(value)); else { ctx.moveTo(x, volumeY(value)); started = true; }
+    });
+    if (started) ctx.stroke();
+  };
+  drawVolumeAverage(5, COLORS.volume5); drawVolumeAverage(20, COLORS.volume20);
+
   ctx.font = '11px system-ui'; ctx.textAlign = 'left';
   [[7, COLORS.ma7], [13, COLORS.ma13], [40, COLORS.ma40]].forEach(([period, color], index) => {
     ctx.fillStyle = color; ctx.fillText(`MA${period}`, pad.l + index * 46, 13);
   });
+  const last = rows.at(-1), lastVolumeAverage = visibleVolumeAverages.at(-1) || {};
+  const volumeLegend = [
+    ['VOL', compactVolume(last.volume), COLORS.text],
+    ['VMA5', compactVolume(lastVolumeAverage[5]), COLORS.volume5],
+    ['VMA20', compactVolume(lastVolumeAverage[20]), COLORS.volume20],
+  ];
+  let legendX = pad.l;
+  volumeLegend.forEach(([label, value, color]) => {
+    const text = `${label} ${value}`; ctx.fillStyle = color; ctx.fillText(text, legendX, volumeTop - 7);
+    legendX += ctx.measureText(text).width + 15;
+  });
+  ctx.fillStyle = COLORS.text; ctx.textAlign = 'left'; ctx.fillText(compactVolume(volumeMax), 3, volumeTop + 4);
   ctx.fillStyle = COLORS.text; ctx.fillText(rows[0].time, pad.l, height - 8); ctx.textAlign = 'right'; ctx.fillText(rows.at(-1).time, width - pad.r, height - 8);
 }
 
 export function candleAtClientPoint(canvas, rows, clientX, clientY) {
   if (!canvas || !rows?.length) return null;
   const rect = canvas.getBoundingClientRect();
-  const pad = { l: 46, r: 16, t: 20, b: 34 };
+  const pad = { l: 46, r: 16, t: 20, b: 25 };
   const x = clientX - rect.left, y = clientY - rect.top;
   if (x < pad.l || x > rect.width - pad.r || y < pad.t || y > rect.height - pad.b) return null;
   const step = (rect.width - pad.l - pad.r) / rows.length;

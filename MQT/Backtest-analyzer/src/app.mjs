@@ -1,6 +1,6 @@
 import { parseQmtLog } from './parser.mjs?v=20260811-v210';
 import { fetchDaily, fetchThirtyMinute } from './market-data.mjs';
-import { candleAtClientPoint, drawCandles, drawScoreSeries } from './chart.mjs';
+import { candleAtClientPoint, drawCandles, drawScoreSeries } from './chart.mjs?v=20260813-v231';
 import { sampleLog } from './sample-log.js';
 import {
   actionLabels, deriveTechnicalFeatures, importSamples, intradayConfirmLabels,
@@ -47,7 +47,7 @@ function selectedIndex() {
 
 function sampleSource() {
   return {
-    webVersion: '2.3.0', strategy: state.report?.meta?.strategy || state.report?.meta?.engine || '',
+    webVersion: '2.3.1', strategy: state.report?.meta?.strategy || state.report?.meta?.engine || '',
     backtestStart: state.report?.meta?.startTime || '', backtestEnd: state.report?.meta?.endTime || '',
   };
 }
@@ -372,7 +372,7 @@ async function renderIndexChart() {
     rows = rows.filter(row => String(row.time).replace(/\D/g, '').slice(0, 8) <= end);
     if (rows.length) {
       drawCandles($('#indexChart'), rows.slice(-90), [], rows);
-      $('#indexChartNote').textContent = `日K · ${rows.at(-90)?.time || rows[0].time} — ${rows.at(-1).time}，截止当前复盘日，不展示未来行情。`;
+      $('#indexChartNote').textContent = `日K · ${rows.at(-90)?.time || rows[0].time} — ${rows.at(-1).time} · 成交量 / VMA5 / VMA20，截止当前复盘日，不展示未来行情。`;
     } else {
       drawScoreSeries($('#indexChart'), indexScoreHistory(code), date);
       $('#indexChartNote').textContent = '腾讯指数K线未返回数据，已自动切换为日志中的指数评分趋势。';
@@ -425,7 +425,7 @@ function renderSectorChart() {
   if (rows.length) {
     $('#sectorChartTitle').textContent = `${code.replace(/^SW1_?/, '')} · 板块代理日K`;
     drawCandles($('#sectorChart'), rows.slice(-90), [], rows);
-    $('#sectorChartNote').textContent = `策略申万成员等权代理K线 · ${rows[0].time} — ${rows.at(-1).time} · MA7 / MA13 / MA40，与板块评分使用同一份QMT行情。`;
+    $('#sectorChartNote').textContent = `策略申万成员等权代理K线 · ${rows[0].time} — ${rows.at(-1).time} · MA7 / MA13 / MA40 · 成交量 / VMA5 / VMA20。`;
   } else {
     $('#sectorChartTitle').textContent = `${code.replace(/^SW1_?/, '')} · 评分历史`;
     drawScoreSeries($('#sectorChart'), scoreRows, state.day?.date);
@@ -499,7 +499,7 @@ async function renderCandidateChart() {
     drawCandles($('#candidateChart'), state.candidateChartRows, trades, rows, sampleMarkers(code));
     $('#sampleCandidate').disabled = !rows.some(row => String(row.time || '').replace(/\D/g, '').slice(0, 8) === end);
     $('#candidateChartNote').textContent = rows.length
-      ? `日K · ${rows[0].time} — ${rows.at(-1).time} · MA7 / MA13 / MA40 · 入场评分 ${scoreText(candidate.entry)}，截止当前复盘日。`
+      ? `日K · ${rows[0].time} — ${rows.at(-1).time} · MA7 / MA13 / MA40 · 成交量 / VMA5 / VMA20 · 入场评分 ${scoreText(candidate.entry)}，截止当前复盘日。`
       : '腾讯财经未返回该股在当前复盘日之前的日K。';
     $('#candidateChartLoading').classList.add('hidden');
   } catch (error) {
@@ -586,7 +586,7 @@ function redrawChart() {
   const sourceStart = String(state.chartRows[0].time).replace(/\D/g, '').slice(0, 8), sourceEnd = String(state.chartRows.at(-1).time).replace(/\D/g, '').slice(0, 8);
   const covered = state.chartTrades.filter(trade => { const date = String(trade.date || '').replace(/\D/g, '').slice(0, 8); return date >= sourceStart && date <= sourceEnd; }).length;
   const coverage = state.chartType === 'daily' ? '覆盖全部买卖日期' : covered ? `分钟行情覆盖 ${covered}/${state.chartTrades.length} 个买卖点` : `有 ${state.chartTrades.length} 个买卖点在分钟行情范围外`;
-  $('#chartRange').textContent = `${state.chartType === 'daily' ? '日K' : '30 分钟K'} · ${coverage} · 显示 ${rows.length} 根（${rows[0].time} — ${rows.at(-1).time}）。滚轮缩放，图内拖动查看区间。`;
+  $('#chartRange').textContent = `${state.chartType === 'daily' ? '日K' : '30 分钟K'} · ${coverage} · 成交量 / VMA5 / VMA20 · 显示 ${rows.length} 根（${rows[0].time} — ${rows.at(-1).time}）。滚轮缩放，图内拖动查看区间。`;
 }
 
 function focusLatestCoveredTrade() {
@@ -621,7 +621,7 @@ function stepDay(offset) {
 function diagnostic() {
   const meta = state.report.meta;
   const legacyLinks = state.report.days.some(day => day.watchlist.some(item => !item.sector));
-  $('#diagnosticText').textContent = [`Web版本：V2.3.0 (2026-08-13)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, `本地研究样本：${state.samples.length} 条`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
+  $('#diagnosticText').textContent = [`Web版本：V2.3.1 (2026-08-13)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, `本地研究样本：${state.samples.length} 条`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
 }
 
 function parse() {
