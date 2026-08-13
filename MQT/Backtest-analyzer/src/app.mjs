@@ -247,9 +247,16 @@ function candidateFor(code) {
   return null;
 }
 
+function filteredStocks(query = $('#stockFilterInput')?.value || '') {
+  const keyword = String(query).trim().toUpperCase();
+  return (state.report?.stocks || []).filter(stock => !keyword || `${stock.code || ''} ${stock.name || ''}`.toUpperCase().includes(keyword));
+}
+
 function populateStockSelect() {
-  const stocks = state.report?.stocks || [];
-  $('#chartStockSelect').innerHTML = stocks.length ? stocks.map(stock => `<option value="${html(stock.code)}">${html(stock.code)}${stock.name ? ` ${html(stock.name)}` : ''} · ${stock.trades.length}笔</option>`).join('') : '<option value="">无买卖记录</option>';
+  const select = $('#chartStockSelect'), stocks = filteredStocks();
+  select.innerHTML = stocks.length ? stocks.map(stock => `<option value="${html(stock.code)}">${html(stock.code)}${stock.name ? ` ${html(stock.name)}` : ''} · ${stock.trades.length}笔</option>`).join('') : '<option value="" disabled>无匹配股票</option>';
+  select.disabled = !stocks.length;
+  if (state.stock && stocks.some(stock => stock.code === state.stock.code)) select.value = state.stock.code;
 }
 
 function renderTradeLedger(trading) {
@@ -338,11 +345,11 @@ function stepDay(offset) {
 function diagnostic() {
   const meta = state.report.meta;
   const legacyLinks = state.report.days.some(day => day.watchlist.some(item => !item.sector));
-  $('#diagnosticText').textContent = [`Web版本：V2.1.0 (2026-08-11)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
+  $('#diagnosticText').textContent = [`Web版本：V2.1.1 (2026-08-13)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
 }
 
 function parse() {
-  state.report = parseQmtLog($('#logInput').value); state.cache.clear(); state.indexCode = ''; state.sectorCode = ''; state.stock = null; state.candidateStock = null;
+  state.report = parseQmtLog($('#logInput').value); state.cache.clear(); state.indexCode = ''; state.sectorCode = ''; state.stock = null; state.candidateStock = null; $('#stockFilterInput').value = '';
   const count = state.report.days.length;
   $('#sourceStatus').textContent = count ? `已解析 ${count} 个交易日 · ${state.report.meta.startTime || '未知'} 至 ${state.report.meta.endTime || '未知'}` : '未识别到策略日志';
   $('#dateSelect').innerHTML = state.report.days.map(day => `<option value="${html(day.date)}">${displayDate(day.date)}</option>`).join('');
@@ -371,6 +378,7 @@ $('#fileInput').addEventListener('change', async event => { const file = event.t
 $('#dateSelect').addEventListener('change', event => selectDay(event.target.value));
 $('#previousDay').addEventListener('click', () => stepDay(-1));
 $('#nextDay').addEventListener('click', () => stepDay(1));
+$('#stockFilterInput').addEventListener('input', () => populateStockSelect());
 $('#chartStockSelect').addEventListener('change', event => { const stock = stockTrading(event.target.value); if (stock) selectStock(stock); });
 document.querySelectorAll('.workspace-tab').forEach(tab => tab.addEventListener('click', () => setWorkspace(tab.dataset.workspace)));
 document.querySelectorAll('.sector-tab').forEach(tab => tab.addEventListener('click', () => {
