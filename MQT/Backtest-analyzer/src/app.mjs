@@ -257,6 +257,7 @@ function populateStockSelect() {
   select.innerHTML = stocks.length ? stocks.map(stock => `<option value="${html(stock.code)}">${html(stock.code)}${stock.name ? ` ${html(stock.name)}` : ''} · ${stock.trades.length}笔</option>`).join('') : '<option value="" disabled>无匹配股票</option>';
   select.disabled = !stocks.length;
   if (state.stock && stocks.some(stock => stock.code === state.stock.code)) select.value = state.stock.code;
+  return stocks;
 }
 
 function renderTradeLedger(trading) {
@@ -345,7 +346,7 @@ function stepDay(offset) {
 function diagnostic() {
   const meta = state.report.meta;
   const legacyLinks = state.report.days.some(day => day.watchlist.some(item => !item.sector));
-  $('#diagnosticText').textContent = [`Web版本：V2.1.1 (2026-08-13)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
+  $('#diagnosticText').textContent = [`Web版本：V2.1.2 (2026-08-13)`, `回测引擎：${meta.engine || '未记录'}`, `开始时间：${meta.startTime || '未记录'}`, `结束时间：${meta.endTime || '未记录'}`, `首根K线：${meta.firstBar || '未记录'}`, legacyLinks ? '提示：当前日志没有个股板块归属字段，Web按指数显示观察池。' : '', ...meta.warnings].filter(Boolean).join('\n');
 }
 
 function parse() {
@@ -378,7 +379,10 @@ $('#fileInput').addEventListener('change', async event => { const file = event.t
 $('#dateSelect').addEventListener('change', event => selectDay(event.target.value));
 $('#previousDay').addEventListener('click', () => stepDay(-1));
 $('#nextDay').addEventListener('click', () => stepDay(1));
-$('#stockFilterInput').addEventListener('input', () => populateStockSelect());
+$('#stockFilterInput').addEventListener('input', () => {
+  const stocks = populateStockSelect();
+  if (stocks.length === 1 && stocks[0].code !== state.stock?.code) selectStock(stocks[0]);
+});
 $('#chartStockSelect').addEventListener('change', event => { const stock = stockTrading(event.target.value); if (stock) selectStock(stock); });
 document.querySelectorAll('.workspace-tab').forEach(tab => tab.addEventListener('click', () => setWorkspace(tab.dataset.workspace)));
 document.querySelectorAll('.sector-tab').forEach(tab => tab.addEventListener('click', () => {
